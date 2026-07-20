@@ -574,12 +574,14 @@ def build_generation_router(
             or model_id.startswith("firefly-veo31-fast")
             or model_id.startswith("firefly-veo31-")
             or model_id.startswith("firefly-kling-")
+            or model_id.startswith("firefly-kling3-")
+            or model_id.startswith("firefly-seedance20-")
         ) and model_id not in video_model_catalog:
             return JSONResponse(
                 status_code=400,
                 content={
                     "error": {
-                        "message": "Invalid video model. Use /v1/models to get supported firefly-sora2-*, firefly-veo31-*, firefly-veo31-fast-* or firefly-kling-* models",
+                        "message": "Invalid video model. Use /v1/models to get supported firefly-sora2-*, firefly-veo31-*, firefly-kling-*, firefly-kling3-* or firefly-seedance20-* models",
                         "type": "invalid_request_error",
                     }
                 },

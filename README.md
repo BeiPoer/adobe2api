@@ -75,6 +75,8 @@ docker compose up -d --build
 - `firefly-veo31-*`（视频）
 - `firefly-veo31-ref-*`（视频，参考图模式）
 - `firefly-veo31-fast-*`（视频）
+- `firefly-seedance20-*`（视频）
+- `firefly-seedance20-fast-*`（视频）
 - `firefly-kling3-*`（视频，Kling 3.0，支持首尾帧参考）
 - `firefly-kling-o3-*`（视频，支持实体引用）
 
@@ -189,6 +191,30 @@ Veo31 Fast 视频模型：
   - `firefly-veo31-fast-4s-16x9-1080p`
   - `firefly-veo31-fast-6s-9x16-720p`
 
+Seedance 2.0 视频模型：
+
+- 命名：`firefly-seedance20-{duration}-{ratio}-{resolution}`
+- 时长：`4s` 到 `15s`
+- 比例：`21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
+- 分辨率：`480p` / `720p` / `1080p`
+- 最多支持 1 张参考图（映射到上游 `referenceBlobs[].usage="style"`）
+- 音频默认开启；可通过 `generate_audio` / `generateAudio` 覆盖
+- 示例：
+  - `firefly-seedance20-4s-16x9-480p`
+  - `firefly-seedance20-15s-9x16-1080p`
+
+Seedance 2.0 Fast 视频模型：
+
+- 命名：`firefly-seedance20-fast-{duration}-{ratio}-{resolution}`
+- 时长：`4s` 到 `15s`
+- 比例：`21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
+- 分辨率：`480p` / `720p` / `1080p`
+- 最多支持 1 张参考图（映射到上游 `referenceBlobs[].usage="style"`）
+- 音频默认开启；可通过 `generate_audio` / `generateAudio` 覆盖
+- 示例：
+  - `firefly-seedance20-fast-4s-16x9-480p`
+  - `firefly-seedance20-fast-15s-9x16-1080p`
+
 Kling 3.0 视频模型：
 
 - 命名：`firefly-kling3-{duration}-{ratio}`
@@ -272,6 +298,8 @@ Veo31 单图语义说明：
   - 2 张图 => 首帧 + 尾帧
 - `firefly-veo31-ref-*`：参考图模式
   - 1~3 张图 => 参考图
+- `firefly-seedance20-*` / `firefly-seedance20-fast-*`：媒体参考模式
+  - 1 张图 => 风格参考（`usage="style"`）
 
 图生视频：
 

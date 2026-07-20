@@ -77,6 +77,8 @@ Current supported model families are:
 - `firefly-veo31-*` (video)
 - `firefly-veo31-ref-*` (video, reference-image mode)
 - `firefly-veo31-fast-*` (video)
+- `firefly-seedance20-*` (video)
+- `firefly-seedance20-fast-*` (video)
 - `firefly-kling3-*` (video, Kling 3.0 with frame references)
 
 Nano Banana image models (`nano-banana-2`):
@@ -190,6 +192,30 @@ Veo31 Fast video models:
   - `firefly-veo31-fast-4s-16x9-1080p`
   - `firefly-veo31-fast-6s-9x16-720p`
 
+Seedance 2.0 video models:
+
+- Pattern: `firefly-seedance20-{duration}-{ratio}-{resolution}`
+- Duration: `4s` through `15s`
+- Ratio: `21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
+- Resolution: `480p` / `720p` / `1080p`
+- Supports 1 reference image, mapped to upstream `referenceBlobs[].usage="style"`
+- Audio defaults to enabled; override with `generate_audio` / `generateAudio`
+- Examples:
+  - `firefly-seedance20-4s-16x9-480p`
+  - `firefly-seedance20-15s-9x16-1080p`
+
+Seedance 2.0 Fast video models:
+
+- Pattern: `firefly-seedance20-fast-{duration}-{ratio}-{resolution}`
+- Duration: `4s` through `15s`
+- Ratio: `21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
+- Resolution: `480p` / `720p` / `1080p`
+- Supports 1 reference image, mapped to upstream `referenceBlobs[].usage="style"`
+- Audio defaults to enabled; override with `generate_audio` / `generateAudio`
+- Examples:
+  - `firefly-seedance20-fast-4s-16x9-480p`
+  - `firefly-seedance20-fast-15s-9x16-1080p`
+
 Kling 3.0 video models:
 
 - Pattern: `firefly-kling3-{duration}-{ratio}`
@@ -261,6 +287,8 @@ Veo31 single-image semantics:
   - 2 images => first frame + last frame
 - `firefly-veo31-ref-*`: reference-image mode
   - 1~3 images => reference images
+- `firefly-seedance20-*` / `firefly-seedance20-fast-*`: media reference mode
+  - 1 image => style reference (`usage="style"`)
 
 Image-to-video:
 

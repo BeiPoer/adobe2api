@@ -23,6 +23,10 @@ RATIO_SUFFIX_MAP = {
     "4:3": "4x3",
     "3:4": "3x4",
 }
+SEEDANCE_RATIO_SUFFIX_MAP = {
+    **RATIO_SUFFIX_MAP,
+    "21:9": "21x9",
+}
 NANO_BANANA2_RATIO_SUFFIX_MAP = {
     **RATIO_SUFFIX_MAP,
     "1:8": "1x8",
@@ -211,3 +215,35 @@ for dur in (5, 10, 15):
             "generate_audio": True,
             "description": f"Firefly Kling 3.0 video model ({dur}s {ratio} 720p)",
         }
+
+for dur in range(4, 16):
+    for ratio in ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"):
+        for res in ("480p", "720p", "1080p"):
+            model_id = f"firefly-seedance20-{dur}s-{SEEDANCE_RATIO_SUFFIX_MAP[ratio]}-{res}"
+            VIDEO_MODEL_CATALOG[model_id] = {
+                "engine": "seedance",
+                "upstream_model": "bytedance:firefly:seedance",
+                "upstream_model_id": "seedance",
+                "upstream_model_version": "seedance_2.0",
+                "duration": dur,
+                "aspect_ratio": ratio,
+                "resolution": res,
+                "generate_audio": True,
+                "description": f"Firefly Seedance 2.0 video model ({dur}s {ratio} {res})",
+            }
+
+for dur in range(4, 16):
+    for ratio in ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"):
+        for res in ("480p", "720p", "1080p"):
+            model_id = f"firefly-seedance20-fast-{dur}s-{SEEDANCE_RATIO_SUFFIX_MAP[ratio]}-{res}"
+            VIDEO_MODEL_CATALOG[model_id] = {
+                "engine": "seedance-fast",
+                "upstream_model": "bytedance:firefly:seedance-fast",
+                "upstream_model_id": "seedance",
+                "upstream_model_version": "seedance_2.0_fast",
+                "duration": dur,
+                "aspect_ratio": ratio,
+                "resolution": res,
+                "generate_audio": True,
+                "description": f"Firefly Seedance 2.0 Fast video model ({dur}s {ratio} {res})",
+            }

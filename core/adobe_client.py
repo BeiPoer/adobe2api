@@ -12,7 +12,7 @@ from urllib.parse import quote, urlparse
 import requests
 
 from core.config_mgr import config_manager
-from core.models import build_image_payload_candidates
+from core.models import build_image_payload_candidates, video_size_from_ratio
 
 try:
     from curl_cffi.requests import Session as CurlSession
@@ -953,14 +953,7 @@ class AdobeClient:
 
     @staticmethod
     def _video_size(aspect_ratio: str, resolution: str = "720p") -> dict:
-        res = str(resolution or "720p").lower()
-        if res == "1080p":
-            if aspect_ratio == "16:9":
-                return {"width": 1920, "height": 1080}
-            return {"width": 1080, "height": 1920}
-        if aspect_ratio == "16:9":
-            return {"width": 1280, "height": 720}
-        return {"width": 720, "height": 1280}
+        return video_size_from_ratio(aspect_ratio, resolution)
 
     @staticmethod
     def _coerce_progress_percent(value: Any) -> Optional[float]:
@@ -1133,6 +1126,35 @@ class AdobeClient:
             video_conf.get("upstream_model") or "openai:firefly:colligo:sora2"
         )
         resolution = str(video_conf.get("resolution") or "720p")
+        if engine in {"seedance", "seedance-fast"}:
+            model_version = str(
+                video_conf.get("upstream_model_version")
+                or ("seedance_2.0_fast" if engine == "seedance-fast" else "seedance_2.0")
+            )
+            payload = {
+                "modelId": "seedance",
+                "modelVersion": model_version,
+                "size": self._video_size(aspect_ratio, resolution),
+                "seeds": [seed_val],
+                "referenceBlobs": [],
+                "prompt": prompt,
+                "negativePrompt": negative_prompt
+                or "cartoon, vector art, & bad aesthetics & poor aesthetic",
+                "duration": int(duration),
+                "generateAudio": bool(generate_audio),
+                "generationMetadata": {
+                    "module": "text2video",
+                    "submodule": "ff-video-generate",
+                },
+                "generationSettings": {"aspectRatio": aspect_ratio},
+            }
+            if source_image_ids:
+                for image_id in source_image_ids[:1]:
+                    payload["referenceBlobs"].append(
+                        {"id": str(image_id), "usage": "style"}
+                    )
+            return payload
+
         if engine in {"veo31-fast", "veo31-standard"}:
             model_version = (
                 "3.1-fast-generate" if engine == "veo31-fast" else "3.1-generate"

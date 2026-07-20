@@ -53,6 +53,7 @@ from core.models import (
     VIDEO_MODEL_CATALOG,
     resolve_model,
     resolve_ratio_and_resolution,
+    video_size_from_ratio,
 )
 
 
@@ -1003,11 +1004,8 @@ def _prepare_video_source_image(
             detail="Pillow is required for video image preprocessing (resize/crop)",
         )
 
-    res = str(resolution or "720p").lower()
-    if res == "1080p":
-        target_size = (1920, 1080) if aspect_ratio == "16:9" else (1080, 1920)
-    else:
-        target_size = (1280, 720) if aspect_ratio == "16:9" else (720, 1280)
+    target = video_size_from_ratio(aspect_ratio, resolution)
+    target_size = (int(target["width"]), int(target["height"]))
     try:
         with Image.open(io.BytesIO(image_bytes)) as src:
             src = src.convert("RGB")

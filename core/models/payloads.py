@@ -4,6 +4,41 @@ import time
 from typing import Optional
 
 
+VIDEO_SIZE_MAP = {
+    "480p": {
+        "21:9": {"width": 1120, "height": 480},
+        "16:9": {"width": 854, "height": 480},
+        "4:3": {"width": 640, "height": 480},
+        "1:1": {"width": 480, "height": 480},
+        "3:4": {"width": 480, "height": 640},
+        "9:16": {"width": 480, "height": 854},
+    },
+    "720p": {
+        "21:9": {"width": 1680, "height": 720},
+        "16:9": {"width": 1280, "height": 720},
+        "4:3": {"width": 960, "height": 720},
+        "1:1": {"width": 720, "height": 720},
+        "3:4": {"width": 720, "height": 960},
+        "9:16": {"width": 720, "height": 1280},
+    },
+    "1080p": {
+        "21:9": {"width": 2520, "height": 1080},
+        "16:9": {"width": 1920, "height": 1080},
+        "4:3": {"width": 1440, "height": 1080},
+        "1:1": {"width": 1080, "height": 1080},
+        "3:4": {"width": 1080, "height": 1440},
+        "9:16": {"width": 1080, "height": 1920},
+    },
+}
+
+
+def video_size_from_ratio(aspect_ratio: str, resolution: str = "720p") -> dict:
+    ratio = str(aspect_ratio or "16:9").strip()
+    res = str(resolution or "720p").strip().lower()
+    size_map = VIDEO_SIZE_MAP.get(res) or VIDEO_SIZE_MAP["720p"]
+    return dict(size_map.get(ratio) or size_map["16:9"])
+
+
 def size_from_ratio(ratio: str, output_resolution: str = "2K") -> dict:
     level = (output_resolution or "2K").upper()
     if level == "1K":
