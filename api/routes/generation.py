@@ -1,3 +1,4 @@
+import base64
 import re
 import secrets
 import threading
@@ -7,11 +8,16 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.schemas import GenerateRequest
 from core.entity_store import entity_store
+from core.models.payloads import (
+    gpt_image_detail_level_from_quality,
+    parse_gpt_image_n,
+    parse_gpt_image_size,
+)
 
 
 def build_generation_router(
@@ -184,6 +190,39 @@ def build_generation_router(
 
         return entity_ref_re.sub(replace_match, raw_prompt), refs
 
+    def _invalid_image_request(message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": str(message),
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
+    def _gpt_api_options(
+        data: dict, resolved_model_id: str, model_conf: dict
+    ) -> tuple[dict | None, int | None, str, int]:
+        detail_level = model_conf.get("detail_level")
+        if resolved_model_id != "gpt-image-2":
+            return None, detail_level, "url", 1
+
+        pixel_size = parse_gpt_image_size(data.get("size"))
+        quality = str(data.get("quality") or "medium").strip().lower()
+        if quality not in {"auto", "low", "medium", "high"}:
+            raise ValueError("quality must be one of: auto, low, medium, high")
+        if quality == "auto":
+            quality = "medium"
+        detail_level = gpt_image_detail_level_from_quality(quality)
+        response_format = str(
+            data.get("response_format") or "b64_json"
+        ).strip().lower()
+        if response_format not in {"url", "b64_json"}:
+            raise ValueError("response_format must be one of: url, b64_json")
+        n = parse_gpt_image_n(data.get("n"))
+        return pixel_size, detail_level, response_format, n
+
     @router.get("/v1/models")
     def list_models(request: Request):
         require_service_api_key(request)
@@ -241,6 +280,12 @@ def build_generation_router(
             data, model_id
         )
         model_conf = resolve_model(resolved_model_id)
+        try:
+            pixel_size, detail_level, response_format, n = _gpt_api_options(
+                data, resolved_model_id, model_conf
+            )
+        except ValueError as exc:
+            return _invalid_image_request(str(exc))
 
         try:
             set_request_task_progress(
@@ -259,10 +304,14 @@ def build_generation_router(
                     )
 
                 job_id = uuid.uuid4().hex
-                out_path = generated_dir / f"{job_id}.png"
+                out_path = (
+                    generated_dir / f"{job_id}.png"
+                    if response_format == "url" and n == 1
+                    else None
+                )
                 old_size = 0
                 try:
-                    if out_path.exists():
+                    if out_path is not None and out_path.exists():
                         old_size = int(out_path.stat().st_size)
                 except Exception:
                     old_size = 0
@@ -281,15 +330,51 @@ def build_generation_router(
                     quality_level=(
                         client.gpt_image_quality
                         if str(model_conf.get("upstream_model_id") or "") == "gpt-image"
+                        and resolved_model_id != "gpt-image-2"
                         else None
                     ),
-                    detail_level=model_conf.get("detail_level"),
+                    detail_level=detail_level,
+                    pixel_size=pixel_size,
+                    n=n,
                     timeout=client.generate_timeout,
                     out_path=out_path,
                     progress_cb=_image_progress_cb,
                 )
-                if image_bytes is not None:
+                if response_format == "b64_json":
+                    images = image_bytes if isinstance(image_bytes, list) else [image_bytes]
+                    if not images or any(image is None for image in images):
+                        raise RuntimeError("image generation returned no image data")
+                    return {
+                        "created": int(time.time()),
+                        "model": resolved_model_id,
+                        "data": [
+                            {"b64_json": base64.b64encode(image).decode("ascii")}
+                            for image in images
+                        ],
+                    }
+
+                if n > 1:
+                    images = image_bytes if isinstance(image_bytes, list) else [image_bytes]
+                    if len(images) != n or any(image is None for image in images):
+                        raise RuntimeError("image generation returned incomplete image data")
+                    image_urls = []
+                    for index, image in enumerate(images, start=1):
+                        image_id = f"{job_id}-{index}"
+                        image_path = generated_dir / f"{image_id}.png"
+                        image_path.write_bytes(image)
+                        on_generated_file_written(image_path, 0, len(image))
+                        image_urls.append(public_image_url(request, image_id))
+                    set_request_preview(request, image_urls[0], kind="image")
+                    return {
+                        "created": int(time.time()),
+                        "model": resolved_model_id,
+                        "data": [{"url": image_url} for image_url in image_urls],
+                    }
+
+                if image_bytes is not None and out_path is not None:
                     out_path.write_bytes(image_bytes)
+                if out_path is None:
+                    raise RuntimeError("image generation returned no output path")
                 new_size = int(out_path.stat().st_size) if out_path.exists() else 0
                 on_generated_file_written(out_path, old_size, new_size)
                 image_url = public_image_url(request, job_id)
@@ -417,6 +502,184 @@ def build_generation_router(
             )
             logger.exception(
                 "Unhandled error in /v1/images/generations log_id=%s model=%s",
+                getattr(request.state, "log_id", ""),
+                resolved_model_id,
+            )
+            set_request_task_progress(
+                request, task_status="FAILED", task_progress=0.0, error=str(exc)
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "message": str(exc),
+                        "type": "server_error",
+                        "code": error_code,
+                    }
+                },
+            )
+
+    @router.post("/v1/images/edits")
+    def openai_edit(
+        request: Request,
+        prompt: str = Form(""),
+        model: str = Form("gpt-image-2"),
+        size: str = Form("auto"),
+        quality: str = Form("medium"),
+        n: int = Form(1),
+        image: list[UploadFile] = File(default_factory=list),
+        image_array: list[UploadFile] = File(default_factory=list, alias="image[]"),
+        mask: UploadFile | None = File(None),
+    ):
+        require_service_api_key(request)
+
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            return _invalid_image_request("prompt is required")
+        if mask is not None:
+            return _invalid_image_request("mask is not supported")
+
+        uploads = [*image, *image_array]
+        if not uploads:
+            return _invalid_image_request("image is required")
+        if len(uploads) > 16:
+            return _invalid_image_request("at most 16 input images are supported")
+
+        model_id = str(model or "gpt-image-2").strip() or "gpt-image-2"
+        if model_id not in model_catalog:
+            return _invalid_image_request(f"Invalid model: {model_id}")
+        model_conf = resolve_model(model_id)
+        if str(model_conf.get("upstream_model_id") or "") != "gpt-image":
+            return _invalid_image_request("/v1/images/edits supports GPT Image models only")
+
+        data = {
+            "model": model_id,
+            "size": size,
+            "quality": quality,
+            "n": n,
+            "response_format": "b64_json",
+        }
+        ratio, output_resolution, resolved_model_id = resolve_ratio_and_resolution(
+            data, model_id
+        )
+        try:
+            pixel_size, detail_level, _response_format, n = _gpt_api_options(
+                data, resolved_model_id, model_conf
+            )
+        except ValueError as exc:
+            return _invalid_image_request(str(exc))
+
+        input_images: list[tuple[bytes, str]] = []
+        allowed_mime_types = {"image/jpeg", "image/png", "image/webp"}
+        for upload in uploads:
+            mime_type = str(upload.content_type or "image/jpeg").split(";", 1)[0].lower()
+            if mime_type == "image/jpg":
+                mime_type = "image/jpeg"
+            if mime_type not in allowed_mime_types:
+                return _invalid_image_request(f"unsupported image type: {mime_type}")
+            image_bytes = upload.file.read(50 * 1024 * 1024 + 1)
+            if not image_bytes:
+                return _invalid_image_request("image is empty")
+            if len(image_bytes) > 50 * 1024 * 1024:
+                return _invalid_image_request("image too large, max 50MB")
+            input_images.append((image_bytes, mime_type))
+
+        try:
+            set_request_task_progress(
+                request, task_status="IN_PROGRESS", task_progress=0.0
+            )
+
+            def _run_once(token: str):
+                source_image_ids = [
+                    client.upload_image(token, image_bytes, mime_type)
+                    for image_bytes, mime_type in input_images
+                ]
+
+                def _image_progress_cb(update: dict):
+                    set_request_task_progress(
+                        request,
+                        task_status=str(update.get("task_status") or "IN_PROGRESS"),
+                        task_progress=update.get("task_progress"),
+                        upstream_job_id=update.get("upstream_job_id"),
+                        retry_after=update.get("retry_after"),
+                        error=update.get("error"),
+                    )
+
+                image_bytes, _meta = client.generate(
+                    token=token,
+                    prompt=prompt,
+                    aspect_ratio=ratio,
+                    output_resolution=output_resolution,
+                    upstream_model_id=str(model_conf.get("upstream_model_id")),
+                    upstream_model_version=str(model_conf.get("upstream_model_version")),
+                    quality_level=(
+                        client.gpt_image_quality
+                        if resolved_model_id != "gpt-image-2"
+                        else None
+                    ),
+                    detail_level=detail_level,
+                    source_image_ids=source_image_ids,
+                    pixel_size=pixel_size,
+                    n=n,
+                    timeout=client.generate_timeout,
+                    progress_cb=_image_progress_cb,
+                )
+                images = image_bytes if isinstance(image_bytes, list) else [image_bytes]
+                if not images or any(image is None for image in images):
+                    raise RuntimeError("image edit returned no image data")
+                return {
+                    "created": int(time.time()),
+                    "model": resolved_model_id,
+                    "data": [
+                        {"b64_json": base64.b64encode(image).decode("ascii")}
+                        for image in images
+                    ],
+                }
+
+            return run_with_token_retries(
+                request=request,
+                operation_name="images.edits",
+                run_once=_run_once,
+            )
+        except HTTPException as exc:
+            error_code = set_request_error_detail(
+                request,
+                error=str(exc.detail),
+                status_code=exc.status_code,
+                error_type=(
+                    "invalid_request_error"
+                    if 400 <= int(exc.status_code) < 500
+                    else "server_error"
+                ),
+                include_traceback=False,
+            )
+            set_request_task_progress(
+                request, task_status="FAILED", task_progress=0.0, error=str(exc.detail)
+            )
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "error": {
+                        "message": str(exc.detail),
+                        "type": (
+                            "invalid_request_error"
+                            if 400 <= int(exc.status_code) < 500
+                            else "server_error"
+                        ),
+                        "code": error_code,
+                    }
+                },
+            )
+        except Exception as exc:
+            error_code = set_request_error_detail(
+                request,
+                error=exc,
+                status_code=500,
+                error_type="server_error",
+                include_traceback=True,
+            )
+            logger.exception(
+                "Unhandled error in /v1/images/edits log_id=%s model=%s",
                 getattr(request.state, "log_id", ""),
                 resolved_model_id,
             )

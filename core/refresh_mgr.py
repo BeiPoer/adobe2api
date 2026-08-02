@@ -19,7 +19,14 @@ PROFILE_FILE = CONFIG_DIR / "refresh_profile.json"
 
 class RefreshManager:
     DEFAULT_REFRESH_URL = "https://adobeid-na1.services.adobe.com/ims/check/v6/token?jslVersion=v2-v0.48.0-1-g1e322cb"
-    DEFAULT_SCOPE = "AdobeID,firefly_api,openid"
+    DEFAULT_CLIENT_ID = "clio-playground-web"
+    DEFAULT_ORIGIN = "https://firefly.adobe.com"
+    DEFAULT_SCOPE = (
+        "AdobeID,firefly_api,openid,pps.read,pps.write,"
+        "additional_info.projectedProductContext,additional_info.ownerOrg,"
+        "uds_read,uds_write,ab.manage,read_organizations,additional_info.roles,"
+        "account_cluster.read,creative_production,tk_platform,tk_platform_sync,profile"
+    )
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -98,13 +105,13 @@ class RefreshManager:
                 or "application/x-www-form-urlencoded;charset=UTF-8"
             ),
             "Cookie": str(headers.get("Cookie") or "").strip(),
-            "Origin": "https://new.express.adobe.com",
-            "Referer": "https://new.express.adobe.com/",
+            "Origin": RefreshManager.DEFAULT_ORIGIN,
+            "Referer": f"{RefreshManager.DEFAULT_ORIGIN}/",
             "User-Agent": str(headers.get("User-Agent") or "Mozilla/5.0"),
         }
 
         normalized_form = {
-            "client_id": "projectx_webapp",
+            "client_id": RefreshManager.DEFAULT_CLIENT_ID,
             "guest_allowed": str(form.get("guest_allowed") or "true").strip() or "true",
             "scope": RefreshManager.DEFAULT_SCOPE,
         }
@@ -236,12 +243,6 @@ class RefreshManager:
 
     @staticmethod
     def _cookie_string_from_input(cookie_input) -> str:
-        if isinstance(cookie_input, str):
-            text = cookie_input.strip()
-            if text.lower().startswith("cookie:"):
-                text = text.split(":", 1)[1].strip()
-            return text
-
         if isinstance(cookie_input, dict):
             if isinstance(cookie_input.get("cookies"), list):
                 cookie_input = cookie_input.get("cookies")
@@ -249,6 +250,12 @@ class RefreshManager:
                 cookie_input = cookie_input.get("cookie")
             else:
                 return ""
+
+        if isinstance(cookie_input, str):
+            text = cookie_input.strip()
+            if text.lower().startswith("cookie:"):
+                text = text.split(":", 1)[1].strip()
+            return text
 
         if isinstance(cookie_input, list):
             pairs: List[str] = []
@@ -336,7 +343,7 @@ class RefreshManager:
                     "url": self.DEFAULT_REFRESH_URL,
                     "method": "POST",
                     "form": {
-                        "client_id": "projectx_webapp",
+                        "client_id": self.DEFAULT_CLIENT_ID,
                         "guest_allowed": "true",
                         "scope": self.DEFAULT_SCOPE,
                     },
@@ -345,8 +352,8 @@ class RefreshManager:
                         "Accept-Language": "zh-CN,zh;q=0.9",
                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
                         "Cookie": cookie,
-                        "Origin": "https://new.express.adobe.com",
-                        "Referer": "https://new.express.adobe.com/",
+                        "Origin": self.DEFAULT_ORIGIN,
+                        "Referer": f"{self.DEFAULT_ORIGIN}/",
                         "User-Agent": "Mozilla/5.0",
                     },
                 }
@@ -597,10 +604,10 @@ class RefreshManager:
             "https://firefly.adobe.io/v1/credits/balance",
             headers={
                 "Authorization": f"Bearer {token}",
-                "x-api-key": "SunbreakWebUI1",
+                "x-api-key": self.DEFAULT_CLIENT_ID,
                 "x-account-id": aid,
-                "Origin": "https://new.express.adobe.com",
-                "Referer": "https://new.express.adobe.com/",
+                "Origin": self.DEFAULT_ORIGIN,
+                "Referer": f"{self.DEFAULT_ORIGIN}/",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },

@@ -62,16 +62,6 @@ def _build_submit_nonce(token: str, prompt: str) -> str:
     return hashlib.sha256(nonce_input).hexdigest()
 
 
-def _build_arp_session_id() -> str:
-    now_ms = int(time.time() * 1000)
-    ftr = f"{os.urandom(16).hex()}_{now_ms}_{os.getpid()}_dUAL43-mnts-ants-d4_31ck__tt"
-    raw = json.dumps(
-        {"sid": str(uuid.uuid4()), "ftr": ftr},
-        separators=(",", ":"),
-    )
-    return base64.b64encode(raw.encode("utf-8")).decode("ascii")
-
-
 def _arp_session_id_for_token(token: str) -> str:
     try:
         from core.refresh_mgr import refresh_manager
@@ -319,14 +309,22 @@ class AdobeClient:
 
     def _submit_headers(self, token: str, prompt: str = "") -> dict:
         headers = self._browser_headers()
+        nonce = _build_submit_nonce(token, prompt)
+        arp_session_id = _arp_session_id_for_token(token)
         headers.update(
             {
                 "Authorization": f"Bearer {token}",
-                "x-api-key": self.api_key,
+                "origin": "https://firefly.adobe.com",
+                "referer": "https://firefly.adobe.com/",
+                "x-api-key": "clio-playground-web",
                 "content-type": "application/json",
                 "accept": "*/*",
             }
         )
+        if nonce:
+            headers["x-nonce"] = nonce
+        if arp_session_id:
+            headers["x-arp-session-id"] = arp_session_id
         return headers
 
     def _submit_headers_minimal(self, token: str) -> dict:
@@ -939,6 +937,8 @@ class AdobeClient:
         quality_level: Optional[str] = None,
         detail_level: Optional[int] = None,
         source_image_ids: Optional[list[str]] = None,
+        pixel_size: Optional[dict] = None,
+        n: int = 1,
     ) -> list[dict]:
         return build_image_payload_candidates(
             prompt=prompt,
@@ -949,6 +949,8 @@ class AdobeClient:
             quality_level=quality_level,
             detail_level=detail_level,
             source_image_ids=source_image_ids,
+            pixel_size=pixel_size,
+            n=n,
         )
 
     @staticmethod
@@ -1481,7 +1483,9 @@ class AdobeClient:
         timeout: int = 180,
         out_path: Optional[Path] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
-    ) -> tuple[Optional[bytes], dict]:
+        pixel_size: Optional[dict] = None,
+        n: int = 1,
+    ) -> tuple[Optional[bytes] | list[bytes], dict]:
         submit_resp = None
         last_error = ""
         for payload in self._build_payload_candidates(
@@ -1493,6 +1497,8 @@ class AdobeClient:
             quality_level=quality_level,
             detail_level=detail_level,
             source_image_ids=source_image_ids,
+            pixel_size=pixel_size,
+            n=n,
         ):
             submit_resp = self._post_json(
                 self.submit_url,
@@ -1609,22 +1615,30 @@ class AdobeClient:
                     pass
 
             outputs = latest.get("outputs") or []
-            if outputs:
-                image_url = ((outputs[0] or {}).get("image") or {}).get("presignedUrl")
-                if not image_url:
+            if len(outputs) >= n:
+                image_urls = [
+                    ((output or {}).get("image") or {}).get("presignedUrl")
+                    for output in outputs[:n]
+                ]
+                if any(not image_url for image_url in image_urls):
                     raise AdobeRequestError("job finished without image url")
                 if out_path is not None:
                     self._download_to_file(
-                        image_url,
+                        image_urls[0],
                         headers={"accept": "*/*"},
                         out_path=out_path,
                         timeout=30,
                     )
                     image_bytes = None
                 else:
-                    img_resp = self._get(image_url, headers={"accept": "*/*"}, timeout=30)
-                    img_resp.raise_for_status()
-                    image_bytes = img_resp.content
+                    images = []
+                    for image_url in image_urls:
+                        img_resp = self._get(
+                            image_url, headers={"accept": "*/*"}, timeout=30
+                        )
+                        img_resp.raise_for_status()
+                        images.append(img_resp.content)
+                    image_bytes = images if n > 1 else images[0]
                 if progress_cb:
                     try:
                         progress_cb(

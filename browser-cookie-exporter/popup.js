@@ -100,18 +100,13 @@ function getFireflyArpSessionId(tabId) {
             return item ? item.slice(prefix.length) : "";
           };
 
-          const sid = String(sessionStorage.getItem("ff_session_guid") || "").trim();
-          const ftr = String(
-            localStorage.getItem("forterToken") ||
-              readCookie("forterToken") ||
-              readCookie("forter") ||
-              ""
-          ).trim();
-
-          if (!sid || !ftr) {
-            return "";
+          const token = String(readCookie("sherlockToken") || "").trim();
+          if (!token) return "";
+          try {
+            return decodeURIComponent(token);
+          } catch (_) {
+            return token;
           }
-          return btoa(JSON.stringify({ sid, ftr }));
         },
       },
       (results) => {

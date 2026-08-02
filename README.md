@@ -69,6 +69,7 @@ docker compose up -d --build
 - `firefly-nano-banana-*`（图像，对应上游 `nano-banana-2`）
 - `firefly-nano-banana2-*`（图像，对应上游 `nano-banana-3`）
 - `firefly-nano-banana-pro-*`（图像）
+- `gpt-image-2`（图像，OpenAI 兼容参数）
 - `firefly-gpt-image-*`（图像，对应上游 `gpt-image:2`）
 - `firefly-sora2-*`（视频）
 - `firefly-sora2-pro-*`（视频）
@@ -114,6 +115,13 @@ Nano Banana Pro 图像模型（兼容旧命名）：
 
 GPT Image 图像模型（实验接入）：
 
+- OpenAI 兼容模型名：`gpt-image-2`
+- `size` 支持 `auto` 或 `WIDTHxHEIGHT`；`auto` 映射为 `1024x1024`
+- 自定义尺寸要求：边长为 16 的倍数，最长边不超过 3840，宽高比不超过 3:1，总像素数在 655360 到 8294400 之间
+- `quality` 支持 `auto` / `low` / `medium` / `high`，分别映射 Adobe `detailLevel=3/1/3/3`，默认 `medium`
+- `n` 支持 `1` 到 `10`，透传给 Adobe；`b64_json` 和 `url` 均按 `n` 返回对应数量的 `data` 项
+- `gpt-image-2` 默认返回 `b64_json`；可传 `response_format=url` 返回生成文件 URL
+- 旧模型名及其固定尺寸、系统质量配置和 URL 返回逻辑保持不变：
 - 命名：`firefly-gpt-image-{resolution}-{ratio}`
 - 分辨率：`1k` / `2k` / `4k`
 - 比例后缀：`1x1` / `5x4` / `9x16` / `21x9` / `16x9` / `4x3` / `3x2` / `4x5` / `3x4` / `2x3`
@@ -361,10 +369,27 @@ curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
   -H "Authorization: Bearer <service_api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "firefly-nano-banana-pro-4k-16x9",
-    "prompt": "futuristic city skyline at dusk"
+    "model": "gpt-image-2",
+    "prompt": "futuristic city skyline at dusk",
+    "size": "1376x768",
+    "quality": "medium",
+    "response_format": "b64_json"
   }'
 ```
+
+### 3.5 图片编辑接口：`/v1/images/edits`
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/images/edits" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -F "model=gpt-image-2" \
+  -F "prompt=turn this photo into watercolor style" \
+  -F "image[]=@input.png" \
+  -F "size=1376x768" \
+  -F "quality=medium"
+```
+
+编辑接口支持 1 到 16 张 JPEG、PNG 或 WebP 输入图，每张最大 50 MB，返回 `b64_json`。当前适配未实现 `mask`。
 
 ## 4）Cookie 导入
 

@@ -1033,9 +1033,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (!cookie) {
           throw new Error(`第 ${idx + 1} 项缺少 cookie`);
         }
+        const headers = item.headers || item.firefly_headers;
         return {
           name: String(item.name || item.email || "").trim() || null,
-          cookie,
+          cookie: headers ? { cookie, headers } : cookie,
         };
       });
     }
@@ -1043,7 +1044,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (Array.isArray(value.items)) return toCookieBatchItems(value.items);
       const cookie = cookieToHeaderString(value.cookie != null ? value.cookie : value.cookies != null ? value.cookies : value);
       if (!cookie) throw new Error("cookie 内容为空");
-      return [{ name: String(value.name || value.email || "").trim() || null, cookie }];
+      const headers = value.headers || value.firefly_headers;
+      return [{ name: String(value.name || value.email || "").trim() || null, cookie: headers ? { cookie, headers } : cookie }];
     }
     const cookie = cookieToHeaderString(value);
     if (!cookie) throw new Error("cookie 内容为空");
