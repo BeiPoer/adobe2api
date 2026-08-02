@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -231,7 +232,7 @@ class GptImageApiTests(unittest.TestCase):
                 "endpoint": {
                     "url": RefreshManager.DEFAULT_REFRESH_URL,
                     "form": {
-                        "client_id": "projectx_webapp",
+                        "client_id": RefreshManager.DEFAULT_CLIENT_ID,
                         "scope": "AdobeID,firefly_api,openid",
                     },
                     "headers": {"Cookie": "first=one"},
@@ -242,6 +243,34 @@ class GptImageApiTests(unittest.TestCase):
         self.assertEqual(bundle["form"]["client_id"], "clio-playground-web")
         self.assertIn("creative_production", bundle["form"]["scope"])
         self.assertEqual(bundle["headers"]["Origin"], "https://firefly.adobe.com")
+
+    def test_cookie_refresh_identity_follows_arp_header(self):
+        manager = object.__new__(RefreshManager)
+        manager._lock = nullcontext()
+        manager._profiles = []
+        manager._save_profiles = lambda: None
+
+        legacy = manager.import_cookie({"cookie": "ims_sid=legacy"})
+        firefly = manager.import_cookie(
+            {
+                "cookie": "ims_sid=firefly",
+                "headers": {"x-arp-session-id": "official-session"},
+            }
+        )
+
+        self.assertEqual(
+            legacy["endpoint"]["client_id"], RefreshManager.LEGACY_CLIENT_ID
+        )
+        self.assertEqual(
+            firefly["endpoint"]["client_id"], RefreshManager.DEFAULT_CLIENT_ID
+        )
+        migrated = RefreshManager._normalize_stored_profile(
+            {**manager._profiles[1], "firefly_headers": {}}, 0
+        )
+        self.assertEqual(
+            migrated["endpoint"]["form"]["client_id"],
+            RefreshManager.LEGACY_CLIENT_ID,
+        )
 
     def test_custom_generation_payload_uses_exact_size(self):
         payload = self._payload(pixel_size={"width": 1376, "height": 768})[0]

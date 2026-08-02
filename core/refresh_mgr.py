@@ -27,6 +27,9 @@ class RefreshManager:
         "uds_read,uds_write,ab.manage,read_organizations,additional_info.roles,"
         "account_cluster.read,creative_production,tk_platform,tk_platform_sync,profile"
     )
+    LEGACY_CLIENT_ID = "projectx_webapp"
+    LEGACY_ORIGIN = "https://new.express.adobe.com"
+    LEGACY_SCOPE = "AdobeID,firefly_api,openid"
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -97,6 +100,26 @@ class RefreshManager:
         if not str(headers.get("Cookie") or "").strip():
             raise ValueError("bundle headers missing Cookie")
 
+        use_firefly = (
+            str(form.get("client_id") or "").strip()
+            == RefreshManager.DEFAULT_CLIENT_ID
+        )
+        client_id = (
+            RefreshManager.DEFAULT_CLIENT_ID
+            if use_firefly
+            else RefreshManager.LEGACY_CLIENT_ID
+        )
+        origin = (
+            RefreshManager.DEFAULT_ORIGIN
+            if use_firefly
+            else RefreshManager.LEGACY_ORIGIN
+        )
+        scope = (
+            RefreshManager.DEFAULT_SCOPE
+            if use_firefly
+            else RefreshManager.LEGACY_SCOPE
+        )
+
         normalized_headers = {
             "Accept": str(headers.get("Accept") or "*/*"),
             "Accept-Language": str(headers.get("Accept-Language") or "en-US,en;q=0.9"),
@@ -105,15 +128,15 @@ class RefreshManager:
                 or "application/x-www-form-urlencoded;charset=UTF-8"
             ),
             "Cookie": str(headers.get("Cookie") or "").strip(),
-            "Origin": RefreshManager.DEFAULT_ORIGIN,
-            "Referer": f"{RefreshManager.DEFAULT_ORIGIN}/",
+            "Origin": origin,
+            "Referer": f"{origin}/",
             "User-Agent": str(headers.get("User-Agent") or "Mozilla/5.0"),
         }
 
         normalized_form = {
-            "client_id": RefreshManager.DEFAULT_CLIENT_ID,
+            "client_id": client_id,
             "guest_allowed": str(form.get("guest_allowed") or "true").strip() or "true",
-            "scope": RefreshManager.DEFAULT_SCOPE,
+            "scope": scope,
         }
 
         return {
@@ -130,6 +153,13 @@ class RefreshManager:
         if not isinstance(profile, dict):
             raise ValueError("invalid profile")
         endpoint = profile.get("endpoint")
+        firefly_headers = cls._normalize_firefly_headers(profile.get("firefly_headers"))
+        if isinstance(endpoint, dict):
+            form = dict(endpoint.get("form") or {})
+            form["client_id"] = (
+                cls.DEFAULT_CLIENT_ID if firefly_headers else cls.LEGACY_CLIENT_ID
+            )
+            endpoint = {**endpoint, "form": form}
         validated = cls._validate_bundle({"endpoint": endpoint})
         profile_id = str(profile.get("id") or "").strip() or uuid.uuid4().hex[:8]
         profile_name = str(profile.get("name") or "").strip()
@@ -141,7 +171,6 @@ class RefreshManager:
         state = profile.get("state") if isinstance(profile.get("state"), dict) else {}
         account_raw = profile.get("account")
         account = account_raw if isinstance(account_raw, dict) else {}
-        firefly_headers = cls._normalize_firefly_headers(profile.get("firefly_headers"))
         return {
             "id": profile_id,
             "name": profile_name,
@@ -334,6 +363,10 @@ class RefreshManager:
         if not cookie:
             raise ValueError("cookie is required")
         firefly_headers = self._firefly_headers_from_input(cookie_input)
+        use_firefly = bool(firefly_headers)
+        client_id = self.DEFAULT_CLIENT_ID if use_firefly else self.LEGACY_CLIENT_ID
+        origin = self.DEFAULT_ORIGIN if use_firefly else self.LEGACY_ORIGIN
+        scope = self.DEFAULT_SCOPE if use_firefly else self.LEGACY_SCOPE
         account = self._account_from_cookie_input(
             cookie_input
         ) or self._account_from_import_name(name)
@@ -343,17 +376,17 @@ class RefreshManager:
                     "url": self.DEFAULT_REFRESH_URL,
                     "method": "POST",
                     "form": {
-                        "client_id": self.DEFAULT_CLIENT_ID,
+                        "client_id": client_id,
                         "guest_allowed": "true",
-                        "scope": self.DEFAULT_SCOPE,
+                        "scope": scope,
                     },
                     "headers": {
                         "Accept": "*/*",
                         "Accept-Language": "zh-CN,zh;q=0.9",
                         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
                         "Cookie": cookie,
-                        "Origin": self.DEFAULT_ORIGIN,
-                        "Referer": f"{self.DEFAULT_ORIGIN}/",
+                        "Origin": origin,
+                        "Referer": f"{origin}/",
                         "User-Agent": "Mozilla/5.0",
                     },
                 }
