@@ -2,6 +2,8 @@ const statusText = document.getElementById("statusText");
 const contextText = document.getElementById("contextText");
 const scopeSelect = document.getElementById("scopeSelect");
 const exportJsonBtn = document.getElementById("exportJsonBtn");
+const ARP_CAPTURE_KEY_PREFIX = "firefly-arp:";
+const ARP_CAPTURE_MAX_AGE_MS = 5 * 60 * 1000;
 
 function setStatus(message) {
   statusText.textContent = message;
@@ -82,42 +84,22 @@ function getCookies(filter, storeId) {
 
 function getFireflyArpSessionId(tabId) {
   return new Promise((resolve) => {
-    if (typeof tabId !== "number" || !chrome.scripting) {
+    if (typeof tabId !== "number") {
       resolve("");
       return;
     }
 
-    chrome.scripting.executeScript(
-      {
-        target: { tabId },
-        func: () => {
-          const readCookie = (name) => {
-            const prefix = `${name}=`;
-            const item = document.cookie
-              .split(";")
-              .map((value) => value.trim())
-              .find((value) => value.startsWith(prefix));
-            return item ? item.slice(prefix.length) : "";
-          };
-
-          const token = String(readCookie("sherlockToken") || "").trim();
-          if (!token) return "";
-          try {
-            return decodeURIComponent(token);
-          } catch (_) {
-            return token;
-          }
-        },
-      },
-      (results) => {
-        if (chrome.runtime.lastError) {
-          resolve("");
-          return;
-        }
-        const value = Array.isArray(results) && results[0] ? results[0].result : "";
-        resolve(typeof value === "string" ? value : "");
+    const key = `${ARP_CAPTURE_KEY_PREFIX}${tabId}`;
+    chrome.storage.session.get(key, (result) => {
+      if (chrome.runtime.lastError) {
+        resolve("");
+        return;
       }
-    );
+      const captured = result && result[key];
+      const age = Date.now() - Number((captured && captured.capturedAt) || 0);
+      const value = String((captured && captured.value) || "").trim();
+      resolve(value && age >= 0 && age <= ARP_CAPTURE_MAX_AGE_MS ? value : "");
+    });
   });
 }
 
@@ -198,9 +180,13 @@ async function generatePayload() {
   const { cookies, incognito, storeId } = await collectCookiesByScope(scope);
   const normalizedCookies = toPlaywrightLikeCookies(cookies);
   const cookieHeader = buildCookieHeader(normalizedCookies);
-  const arpSessionId = tab && String(tab.url || "").startsWith("https://firefly.adobe.com/")
+  const isFirefly = tab && String(tab.url || "").startsWith("https://firefly.adobe.com/");
+  const arpSessionId = isFirefly
     ? await getFireflyArpSessionId(tab.id)
     : "";
+  if (isFirefly && !arpSessionId) {
+    throw new Error("Generate once in this Firefly tab, then export within 5 minutes.");
+  }
   const now = new Date();
   const fileTs = toTimestampParts(now);
 

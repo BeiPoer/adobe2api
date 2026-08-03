@@ -14,8 +14,9 @@ minimal JSON format required by `adobe2api`.
 }
 ```
 
-The `headers.x-arp-session-id` field is exported only when the active tab is a
-loaded `https://firefly.adobe.com/` page with Firefly session data available.
+The extension captures the exact `x-arp-session-id` sent by Firefly. It does
+not copy the stale `sherlockToken` cookie. The capture stays in extension
+session memory and must be exported from the same tab within five minutes.
 
 ## Install
 
@@ -27,11 +28,12 @@ loaded `https://firefly.adobe.com/` page with Firefly session data available.
 ## Usage
 
 1. Log in to Adobe or Firefly and open `https://firefly.adobe.com/generate/image`
-2. Open the extension popup
-3. Choose an export scope:
+2. Generate one image in that Firefly tab
+3. Open the extension popup within five minutes
+4. Choose an export scope:
    - `Adobe domains (recommended)`
    - `Current site`
-4. Click `Export Minimal JSON`
+5. Click `Export Minimal JSON`
 
 ## Import Into adobe2api
 
