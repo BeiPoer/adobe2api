@@ -1004,7 +1004,9 @@ def _prepare_video_source_image(
         )
 
     res = str(resolution or "720p").lower()
-    if res == "1080p":
+    if res == "480p":
+        target_size = (854, 480) if aspect_ratio == "16:9" else (480, 854)
+    elif res == "1080p":
         target_size = (1920, 1080) if aspect_ratio == "16:9" else (1080, 1920)
     else:
         target_size = (1280, 720) if aspect_ratio == "16:9" else (720, 1280)

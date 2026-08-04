@@ -391,6 +391,44 @@ curl -X POST "http://127.0.0.1:6001/v1/images/edits" \
 
 编辑接口支持 1 到 16 张 JPEG、PNG 或 WebP 输入图，每张最大 50 MB，返回 `b64_json`。当前适配未实现 `mask`。
 
+### 3.6 Seedance 2.0 官方格式接口
+
+接口格式兼容火山方舟的[创建视频生成任务](https://docs.volcengine.com/docs/82379/1520757)与[查询视频生成任务](https://docs.volcengine.com/docs/82379/1521309)。创建任务：
+
+```bash
+curl -X POST "http://127.0.0.1:6001/api/v3/contents/generations/tasks" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "doubao-seedance-2-0-260128",
+    "content": [
+      {"type":"text","text":"The flames flicker while the basketball drops through the hoop."},
+      {
+        "type":"image_url",
+        "image_url":{"url":"https://example.com/first-frame.png"},
+        "role":"first_frame"
+      }
+    ],
+    "resolution": "480p",
+    "ratio": "16:9",
+    "duration": 5,
+    "seed": -1,
+    "generate_audio": false,
+    "watermark": false
+  }'
+```
+
+创建成功返回 `{"id":"<task_id>"}`。使用任务 ID 查询：
+
+```bash
+curl "http://127.0.0.1:6001/api/v3/contents/generations/tasks/<task_id>" \
+  -H "Authorization: Bearer <service_api_key>"
+```
+
+任务状态为 `queued`、`running`、`succeeded` 或 `failed`；成功后从 `content.video_url` 获取本地持久化视频。图片支持 HTTP(S) URL 或 data URL，可用 `first_frame`、`last_frame` 指定首尾帧。
+
+当前 Adobe Firefly 实测适配范围为模型 `doubao-seedance-2-0-260128`、`480p`、`16:9`、5 秒；其他官方参数会返回 `400`，不会静默降级。
+
 ## 4）Cookie 导入
 
 ### 第一步：使用浏览器插件导出（推荐）

@@ -324,6 +324,17 @@ class RefreshManager:
         return cls._normalize_firefly_headers(cookie_input.get("firefly_headers"))
 
     @staticmethod
+    def _access_token_from_input(cookie_input) -> str:
+        if not isinstance(cookie_input, dict):
+            return ""
+        token = str(cookie_input.get("access_token") or "").strip()
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+        if token and (len(token.split(".")) != 3 or len(token) < 100):
+            raise ValueError("access_token is invalid")
+        return token
+
+    @staticmethod
     def _normalize_email(email_value: str) -> str:
         return str(email_value or "").strip().lower()
 
@@ -363,6 +374,7 @@ class RefreshManager:
         if not cookie:
             raise ValueError("cookie is required")
         firefly_headers = self._firefly_headers_from_input(cookie_input)
+        access_token = self._access_token_from_input(cookie_input)
         use_firefly = bool(firefly_headers)
         client_id = self.DEFAULT_CLIENT_ID if use_firefly else self.LEGACY_CLIENT_ID
         origin = self.DEFAULT_ORIGIN if use_firefly else self.LEGACY_ORIGIN
@@ -428,7 +440,22 @@ class RefreshManager:
         with self._lock:
             self._profiles.append(new_profile)
             self._save_profiles()
-            return self._summary_locked(new_profile)
+            summary = self._summary_locked(new_profile)
+
+        if access_token:
+            token_manager.upsert_auto_refresh_token(
+                access_token,
+                profile_id=profile_id,
+                profile_name=(
+                    str(summary.get("account", {}).get("display_name") or "").strip()
+                    or profile_name
+                ),
+                profile_email=str(
+                    summary.get("account", {}).get("email") or ""
+                ).strip(),
+            )
+            summary["access_token_imported"] = True
+        return summary
 
     def export_cookies(self, ids: Optional[List[str]] = None) -> List[Dict]:
         selected_ids = None

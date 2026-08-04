@@ -20,6 +20,145 @@ from core.models.payloads import (
 )
 
 
+SEEDANCE_MODEL_ID = "doubao-seedance-2-0-260128"
+SEEDANCE_NEGATIVE_PROMPT = "cartoon, vector art, & bad aesthetics & poor aesthetic"
+
+
+def _parse_seedance_request(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="request body must be an object")
+    if str(data.get("model") or "").strip() != SEEDANCE_MODEL_ID:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported model; use {SEEDANCE_MODEL_ID}",
+        )
+
+    content = data.get("content")
+    if not isinstance(content, list) or not content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    prompt_parts: list[str] = []
+    frames: dict[str, dict] = {}
+    unassigned_frames: list[dict] = []
+    for item in content:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="content items must be objects")
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                prompt_parts.append(text)
+            continue
+        if item_type != "image_url":
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported content type: {item_type or 'empty'}",
+            )
+
+        image_url = item.get("image_url")
+        url = (
+            str(image_url.get("url") or "").strip()
+            if isinstance(image_url, dict)
+            else str(image_url or "").strip()
+        )
+        if not url:
+            raise HTTPException(status_code=400, detail="image_url.url is required")
+        role = str(item.get("role") or "").strip()
+        if role not in {"", "first_frame", "last_frame"}:
+            raise HTTPException(status_code=400, detail=f"unsupported image role: {role}")
+        normalized = {
+            "type": "image_url",
+            "image_url": {"url": url},
+            "role": role or "first_frame",
+        }
+        if not role:
+            unassigned_frames.append(normalized)
+        elif role in frames:
+            raise HTTPException(status_code=400, detail=f"duplicate image role: {role}")
+        else:
+            frames[role] = normalized
+
+    if unassigned_frames:
+        if frames or len(unassigned_frames) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="role is required when using first and last frame images",
+            )
+        frames["first_frame"] = unassigned_frames[0]
+    if "last_frame" in frames and "first_frame" not in frames:
+        raise HTTPException(status_code=400, detail="last_frame requires first_frame")
+    if len(frames) > 2:
+        raise HTTPException(status_code=400, detail="at most two frame images are supported")
+
+    prompt = "\n".join(prompt_parts).strip()
+    if not prompt:
+        raise HTTPException(
+            status_code=400,
+            detail="a non-empty text prompt is required by the Adobe upstream",
+        )
+
+    resolution = str(data.get("resolution") or "480p").strip().lower()
+    ratio = str(data.get("ratio") or "16:9").strip()
+    duration = data.get("duration", 5)
+    if resolution != "480p":
+        raise HTTPException(status_code=400, detail="only resolution=480p is supported")
+    if ratio != "16:9":
+        raise HTTPException(status_code=400, detail="only ratio=16:9 is supported")
+    if isinstance(duration, bool) or duration != 5:
+        raise HTTPException(status_code=400, detail="only duration=5 is supported")
+
+    seed = data.get("seed", -1)
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise HTTPException(status_code=400, detail="seed must be an integer")
+    if not -1 <= seed <= 2147483647:
+        raise HTTPException(status_code=400, detail="seed is out of range")
+    if seed == -1:
+        seed = secrets.randbelow(999999)
+
+    generate_audio = data.get("generate_audio", True)
+    if not isinstance(generate_audio, bool):
+        raise HTTPException(status_code=400, detail="generate_audio must be boolean")
+    watermark = data.get("watermark", False)
+    if not isinstance(watermark, bool):
+        raise HTTPException(status_code=400, detail="watermark must be boolean")
+    if watermark:
+        raise HTTPException(status_code=400, detail="watermark=true is not supported")
+
+    unsupported = sorted(
+        set(data)
+        & {
+            "camera_fixed",
+            "draft",
+            "execution_expires_after",
+            "frames",
+            "priority",
+            "return_last_frame",
+            "service_tier",
+            "tools",
+        }
+    )
+    if unsupported:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported parameter: {unsupported[0]}",
+        )
+
+    return {
+        "model": SEEDANCE_MODEL_ID,
+        "prompt": prompt,
+        "images": [
+            frames[role]
+            for role in ("first_frame", "last_frame")
+            if role in frames
+        ],
+        "resolution": resolution,
+        "ratio": ratio,
+        "duration": duration,
+        "seed": seed,
+        "generate_audio": generate_audio,
+    }
+
+
 def build_generation_router(
     *,
     store,
@@ -696,6 +835,155 @@ def build_generation_router(
                     }
                 },
             )
+
+    @router.post("/api/v3/contents/generations/tasks")
+    def create_seedance_task(data: dict, request: Request):
+        require_service_api_key(request)
+        options = _parse_seedance_request(data)
+        input_images = load_input_images(
+            [{"role": "user", "content": options["images"]}]
+        )
+        prepared_images = [
+            prepare_video_source_image(image_bytes, options["ratio"], "480p")
+            for image_bytes, _mime_type in input_images
+        ]
+
+        job = store.create(
+            prompt=options["prompt"], aspect_ratio=options["ratio"]
+        )
+        store.update(
+            job.id,
+            model=options["model"],
+            resolution=options["resolution"],
+            duration=options["duration"],
+            seed=options["seed"],
+            generate_audio=options["generate_audio"],
+        )
+
+        def runner(job_id: str):
+            store.update(job_id, status="running", progress=0.0)
+            max_attempts = client.retry_max_attempts if client.retry_enabled else 1
+            max_attempts = max(1, int(max_attempts))
+            last_error = "No active tokens available in the pool."
+
+            for attempt in range(1, max_attempts + 1):
+                token = token_manager.get_available(
+                    strategy=client.token_rotation_strategy
+                )
+                if not token:
+                    break
+
+                try:
+                    source_image_ids = [
+                        client.upload_image(
+                            token,
+                            image_bytes,
+                            mime_type,
+                            firefly=True,
+                        )
+                        for image_bytes, mime_type in prepared_images
+                    ]
+                    tmp_path = generated_dir / f"{job_id}.video.tmp"
+
+                    def progress_cb(update: dict):
+                        store.update(
+                            job_id,
+                            progress=float(update.get("task_progress") or 0.0),
+                            upstream_job_id=str(
+                                update.get("upstream_job_id") or ""
+                            ),
+                        )
+
+                    video_bytes, video_meta = client.generate_video(
+                        token=token,
+                        video_conf={"engine": "seedance2", "resolution": "480p"},
+                        prompt=options["prompt"],
+                        aspect_ratio=options["ratio"],
+                        duration=options["duration"],
+                        source_image_ids=source_image_ids,
+                        timeout=max(int(client.generate_timeout), 600),
+                        negative_prompt=SEEDANCE_NEGATIVE_PROMPT,
+                        generate_audio=options["generate_audio"],
+                        seed=options["seed"],
+                        out_path=tmp_path,
+                        progress_cb=progress_cb,
+                    )
+                    filename = f"{job_id}.{video_ext_from_meta(video_meta)}"
+                    out_path = generated_dir / filename
+                    old_size = int(out_path.stat().st_size) if out_path.exists() else 0
+                    if video_bytes is not None:
+                        out_path.write_bytes(video_bytes)
+                    elif tmp_path.exists():
+                        tmp_path.replace(out_path)
+                    else:
+                        raise RuntimeError(
+                            "video generation finished without an output file"
+                        )
+                    new_size = int(out_path.stat().st_size)
+                    on_generated_file_written(out_path, old_size, new_size)
+                    token_manager.report_success(token)
+                    store.update(
+                        job_id,
+                        status="succeeded",
+                        progress=100.0,
+                        image_url=public_generated_url(request, filename),
+                    )
+                    return
+                except quota_error_cls:
+                    token_manager.report_exhausted(token)
+                    last_error = "Token quota exhausted."
+                    retryable = attempt < max_attempts
+                except auth_error_cls:
+                    token_manager.handle_auth_failure(token)
+                    last_error = "Token invalid or expired."
+                    retryable = attempt < max_attempts
+                except upstream_temp_error_cls as exc:
+                    last_error = str(exc)
+                    retryable = attempt < max_attempts and (
+                        getattr(exc, "status_code", None) == 408
+                        or client.should_retry_temporary_error(exc)
+                    )
+                except Exception as exc:
+                    store.update(job_id, status="failed", error=str(exc))
+                    return
+
+                if not retryable:
+                    break
+                delay = client._retry_delay_for_attempt(attempt)
+                if delay > 0:
+                    time.sleep(delay)
+
+            store.update(job_id, status="failed", error=last_error)
+
+        threading.Thread(target=runner, args=(job.id,), daemon=True).start()
+        return {"id": job.id}
+
+    @router.get("/api/v3/contents/generations/tasks/{task_id}")
+    def get_seedance_task(task_id: str, request: Request):
+        require_service_api_key(request)
+        job = store.get(task_id)
+        if not job or getattr(job, "model", "") != SEEDANCE_MODEL_ID:
+            raise HTTPException(status_code=404, detail="task not found")
+
+        error = None
+        if job.error:
+            error = {"code": "InternalServiceError", "message": job.error}
+        return {
+            "id": job.id,
+            "model": job.model,
+            "status": job.status,
+            "error": error,
+            "created_at": int(job.created_at),
+            "updated_at": int(job.updated_at),
+            "content": {"video_url": job.image_url} if job.image_url else None,
+            "seed": job.seed,
+            "resolution": job.resolution,
+            "ratio": job.aspect_ratio,
+            "duration": job.duration,
+            "frames": job.duration * 24 + 1,
+            "framespersecond": 24,
+            "generate_audio": job.generate_audio,
+        }
 
     @router.post("/api/v1/generate")
     def create_job(data: GenerateRequest, request: Request):

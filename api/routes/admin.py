@@ -655,9 +655,16 @@ def build_admin_router(
             refresh_result = None
             refresh_error = ""
             try:
-                refresh_result = refresh_manager.refresh_once(
-                    str(profile.get("id") or "")
-                )
+                if profile.get("access_token_imported"):
+                    refresh_result = {
+                        "status": "ok",
+                        "source": "browser_access_token",
+                        "profile_id": profile.get("id"),
+                    }
+                else:
+                    refresh_result = refresh_manager.refresh_once(
+                        str(profile.get("id") or "")
+                    )
             except Exception as exc:
                 refresh_error = str(exc)
             return {
@@ -701,9 +708,16 @@ def build_admin_router(
             refreshed_item = None
             refresh_failed_item = None
             try:
-                refresh_result = refresh_manager.refresh_once(
-                    str(profile.get("id") or "")
-                )
+                if profile.get("access_token_imported"):
+                    refresh_result = {
+                        "status": "ok",
+                        "source": "browser_access_token",
+                        "profile_id": profile.get("id"),
+                    }
+                else:
+                    refresh_result = refresh_manager.refresh_once(
+                        str(profile.get("id") or "")
+                    )
                 refreshed_item = {
                     "index": idx,
                     "profile_id": profile.get("id"),

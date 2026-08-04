@@ -347,7 +347,18 @@ class AdobeClient:
         )
         return headers
 
-    def _poll_headers(self, token: str) -> dict:
+    def _poll_headers(self, token: str, firefly: bool = False) -> dict:
+        if firefly:
+            headers = self._browser_headers()
+            headers.update(
+                {
+                    "Authorization": f"Bearer {token}",
+                    "origin": "https://firefly.adobe.com",
+                    "referer": "https://firefly.adobe.com/",
+                    "accept": "*/*",
+                }
+            )
+            return headers
         return {
             "Authorization": f"Bearer {token}",
             "accept": "*/*",
@@ -637,17 +648,34 @@ class AdobeClient:
         return total
 
     def upload_image(
-        self, token: str, image_bytes: bytes, mime_type: str = "image/jpeg"
+        self,
+        token: str,
+        image_bytes: bytes,
+        mime_type: str = "image/jpeg",
+        firefly: bool = False,
     ) -> str:
         if not image_bytes:
             raise AdobeRequestError("image is empty")
 
-        headers = {
-            "authorization": f"Bearer {token}",
-            "x-api-key": self.api_key,
-            "content-type": mime_type,
-            "accept": "application/json",
-        }
+        if firefly:
+            headers = self._browser_headers()
+            headers.update(
+                {
+                    "authorization": f"Bearer {token}",
+                    "origin": "https://firefly.adobe.com",
+                    "referer": "https://firefly.adobe.com/",
+                    "x-api-key": "clio-playground-web",
+                    "content-type": mime_type,
+                    "accept": "application/json",
+                }
+            )
+        else:
+            headers = {
+                "authorization": f"Bearer {token}",
+                "x-api-key": self.api_key,
+                "content-type": mime_type,
+                "accept": "application/json",
+            }
         resp = self._post_bytes(self.upload_url, headers=headers, payload=image_bytes)
 
         if resp.status_code in (401, 403):
@@ -956,6 +984,10 @@ class AdobeClient:
     @staticmethod
     def _video_size(aspect_ratio: str, resolution: str = "720p") -> dict:
         res = str(resolution or "720p").lower()
+        if res == "480p":
+            if aspect_ratio == "16:9":
+                return {"width": 854, "height": 480}
+            return {"width": 480, "height": 854}
         if res == "1080p":
             if aspect_ratio == "16:9":
                 return {"width": 1920, "height": 1080}
@@ -1128,13 +1160,41 @@ class AdobeClient:
         negative_prompt: str = "",
         generate_audio: bool = True,
         reference_mode: str = "frame",
+        seed: Optional[int] = None,
     ) -> dict:
-        seed_val = int(time.time()) % 999999
+        seed_val = (
+            int(seed)
+            if seed is not None and int(seed) >= 0
+            else int(time.time()) % 999999
+        )
         engine = str(video_conf.get("engine") or "sora2")
         upstream_model = str(
             video_conf.get("upstream_model") or "openai:firefly:colligo:sora2"
         )
         resolution = str(video_conf.get("resolution") or "720p")
+        if engine == "seedance2":
+            return {
+                "modelId": "seedance",
+                "modelVersion": "seedance_2.0",
+                "size": self._video_size(aspect_ratio, resolution),
+                "seeds": [seed_val],
+                "referenceBlobs": [
+                    {"id": str(image_id), "usage": "frame", "order": idx}
+                    for idx, image_id in enumerate(
+                        (source_image_ids or [])[:2], start=1
+                    )
+                ],
+                "prompt": prompt,
+                "negativePrompt": negative_prompt,
+                "duration": int(duration),
+                "generateAudio": bool(generate_audio),
+                "generationMetadata": {
+                    "module": "text2video",
+                    "submodule": "ff-video-generate",
+                },
+                "generationSettings": {"aspectRatio": aspect_ratio},
+                "output": {"storeInputs": True},
+            }
         if engine in {"veo31-fast", "veo31-standard"}:
             model_version = (
                 "3.1-fast-generate" if engine == "veo31-fast" else "3.1-generate"
@@ -1302,6 +1362,7 @@ class AdobeClient:
         negative_prompt: str = "",
         generate_audio: bool = True,
         reference_mode: str = "frame",
+        seed: Optional[int] = None,
         out_path: Optional[Path] = None,
         progress_cb: Optional[Callable[[dict], None]] = None,
     ) -> tuple[Optional[bytes], dict]:
@@ -1315,10 +1376,16 @@ class AdobeClient:
             negative_prompt=negative_prompt,
             generate_audio=generate_audio,
             reference_mode=reference_mode,
+            seed=seed,
         )
+        engine = str(video_conf.get("engine") or "sora2")
         submit_resp = self._post_json(
             self.video_submit_url,
-            headers=self._video_submit_headers(token),
+            headers=(
+                self._submit_headers(token, prompt)
+                if engine == "seedance2"
+                else self._video_submit_headers(token)
+            ),
             payload=payload,
         )
 
@@ -1329,7 +1396,7 @@ class AdobeClient:
             raise AuthError("Token invalid or expired")
 
         if submit_resp.status_code != 200:
-            if submit_resp.status_code in (429, 451) or submit_resp.status_code >= 500:
+            if submit_resp.status_code in (408, 429, 451) or submit_resp.status_code >= 500:
                 raise UpstreamTemporaryError(
                     f"video submit failed: {submit_resp.status_code} {submit_resp.text[:300]}",
                     status_code=submit_resp.status_code,
@@ -1362,12 +1429,14 @@ class AdobeClient:
         start = time.time()
         while True:
             poll_resp = self._get(
-                poll_url, headers=self._poll_headers(token), timeout=60
+                poll_url,
+                headers=self._poll_headers(token, firefly=engine == "seedance2"),
+                timeout=60,
             )
             if poll_resp.status_code in (401, 403):
                 raise AuthError("Token invalid or expired")
             if poll_resp.status_code != 200:
-                if poll_resp.status_code in (429, 451) or poll_resp.status_code >= 500:
+                if poll_resp.status_code in (408, 429, 451) or poll_resp.status_code >= 500:
                     raise UpstreamTemporaryError(
                         f"video poll failed: {poll_resp.status_code} {poll_resp.text[:300]}",
                         status_code=poll_resp.status_code,

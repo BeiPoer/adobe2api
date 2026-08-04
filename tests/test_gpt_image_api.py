@@ -272,6 +272,31 @@ class GptImageApiTests(unittest.TestCase):
             RefreshManager.LEGACY_CLIENT_ID,
         )
 
+    @patch("core.refresh_mgr.token_manager.upsert_auto_refresh_token")
+    def test_cookie_import_preserves_captured_browser_token(self, upsert):
+        manager = object.__new__(RefreshManager)
+        manager._lock = nullcontext()
+        manager._profiles = []
+        manager._save_profiles = lambda: None
+        token = "header." + ("a" * 120) + ".signature"
+
+        profile = manager.import_cookie(
+            {
+                "cookie": "ims_sid=firefly",
+                "access_token": token,
+                "headers": {"x-arp-session-id": "official-session"},
+            },
+            name="browser",
+        )
+
+        self.assertTrue(profile["access_token_imported"])
+        upsert.assert_called_once_with(
+            token,
+            profile_id=profile["id"],
+            profile_name="browser",
+            profile_email="",
+        )
+
     def test_custom_generation_payload_uses_exact_size(self):
         payload = self._payload(pixel_size={"width": 1376, "height": 768})[0]
         self.assertEqual(payload["size"], {"width": 1376, "height": 768})
