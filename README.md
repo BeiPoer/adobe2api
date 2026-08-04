@@ -409,9 +409,9 @@ curl -X POST "http://127.0.0.1:6001/api/v3/contents/generations/tasks" \
         "role":"first_frame"
       }
     ],
-    "resolution": "480p",
-    "ratio": "16:9",
-    "duration": 5,
+    "resolution": "720p",
+    "ratio": "4:3",
+    "duration": 4,
     "seed": -1,
     "generate_audio": false,
     "watermark": false
@@ -425,9 +425,38 @@ curl "http://127.0.0.1:6001/api/v3/contents/generations/tasks/<task_id>" \
   -H "Authorization: Bearer <service_api_key>"
 ```
 
-任务状态为 `queued`、`running`、`succeeded` 或 `failed`；成功后从 `content.video_url` 获取本地持久化视频。图片支持 HTTP(S) URL 或 data URL，可用 `first_frame`、`last_frame` 指定首尾帧。
+任务状态为 `queued`、`running`、`succeeded` 或 `failed`；成功后从 `content.video_url` 获取本地持久化视频。
 
-当前 Adobe Firefly 实测适配范围为模型 `doubao-seedance-2-0-260128`、`480p`、`16:9`、5 秒；其他官方参数会返回 `400`，不会静默降级。
+当前参数兼容范围按 Adobe Firefly 的 Seedance 2.0 页面能力实现：
+
+| 官方参数 | 本项目支持范围 | 说明 |
+| --- | --- | --- |
+| `model` | `doubao-seedance-2-0-260128` | 必填 |
+| `content[].type=text` | 支持 | Adobe 上游要求至少一个非空文本提示词 |
+| `content[].type=image_url` | 支持 | 帧模式支持 `first_frame` / `last_frame`；媒体模式支持 `reference_image` |
+| `content[].type=video_url` | 支持 | `role` 必须为 `reference_video`；HTTP(S) MP4/MOV，单个最大 200 MB |
+| `content[].type=audio_url` | 支持 | `role` 必须为 `reference_audio`；HTTP(S) 或 data URL 的 MP3/WAV，单个最大 15 MB |
+| `resolution` | `480p` / `720p` / `1080p` | 默认 `720p`；Firefly 不提供官方接口中的 `4k` |
+| `ratio` | `21:9` / `16:9` / `4:3` / `1:1` / `3:4` / `9:16` | 默认 `16:9`；Firefly 不提供 `adaptive` |
+| `duration` | `4` 到 `15` 的整数 | 默认 5 秒；Firefly 不提供智能时长 `-1` |
+| `seed` | `-1` 到 `2147483647` | `-1` 由本项目生成随机种子；Firefly 页面支持种子 |
+| `generate_audio` | `true` / `false` | 默认 `true` |
+| `watermark` | 仅 `false` | Firefly 页面没有可见水印开关 |
+| `camera_fixed` / `draft` / `return_last_frame` | 仅 `false` | 接收官方默认空操作；`true` 返回 `400` |
+| `service_tier` | 仅 `default` | `flex` 是火山方舟调度能力，不是 Firefly 能力 |
+| `priority` | 仅 `0` | 接收官方默认空操作 |
+| `tools` | 仅空数组 | Firefly 没有官方接口中的 `web_search` 工具 |
+| `frames` / `execution_expires_after` | 不支持 | Seedance 2.0 或 Firefly 上游没有对应能力 |
+| `callback_url` / `safety_identifier` | 不支持 | 火山方舟平台能力，不会静默忽略非空值 |
+
+`resolution` 表示 Firefly 的质量档位，不保证任意画幅的成品短边恰好等于 480、720 或 1080；Adobe 会按目标画幅和编码对齐调整实际像素尺寸。
+
+参考输入有两种互斥模式：
+
+- 帧模式：1 张首帧，或首帧 + 尾帧共 2 张；帧会按目标分辨率和画幅居中裁剪。
+- 媒体模式：最多 9 张参考图、3 个参考视频、3 段参考音频，媒体总数最多 9 个；参考视频和参考音频各自总时长应不超过 15 秒，由 Adobe 上游校验。
+
+媒体模式中可在提示词里使用 `@Image1`、`@Video1`、`@Audio1` 引用对应顺序的媒体。本项目会转换成 Firefly `referenceBlobs` 所需的 mention ID。帧模式和媒体模式不可混用，与官方接口约束一致。
 
 ## 4）Cookie 导入
 

@@ -701,6 +701,54 @@ class AdobeClient:
             raise AdobeRequestError("upload image succeeded but no image id returned")
         return str(image_id)
 
+    def upload_media(
+        self,
+        token: str,
+        media_bytes: bytes,
+        mime_type: str,
+        kind: str,
+    ) -> str:
+        media_kind = str(kind or "").strip().lower()
+        if media_kind not in {"video", "audio"}:
+            raise AdobeRequestError("media kind must be video or audio")
+        if not media_bytes:
+            raise AdobeRequestError(f"{media_kind} is empty")
+
+        headers = self._browser_headers()
+        headers.update(
+            {
+                "authorization": f"Bearer {token}",
+                "origin": "https://firefly.adobe.com",
+                "referer": "https://firefly.adobe.com/",
+                "x-api-key": "clio-playground-web",
+                "content-type": mime_type,
+                "accept": "application/json",
+            }
+        )
+        upload_url = f"{self.upload_url.rsplit('/', 1)[0]}/{media_kind}"
+        resp = self._post_bytes(upload_url, headers=headers, payload=media_bytes)
+        if resp.status_code in (401, 403):
+            raise AuthError("Token invalid or expired")
+        if resp.status_code != 200:
+            message = f"upload {media_kind} failed: {resp.status_code} {resp.text[:300]}"
+            if resp.status_code in (429, 451) or resp.status_code >= 500:
+                raise UpstreamTemporaryError(
+                    message,
+                    status_code=resp.status_code,
+                    error_type="status",
+                )
+            raise AdobeRequestError(message)
+
+        try:
+            media_id = (((resp.json().get("assets") or [{}])[0]) or {}).get("id")
+        except Exception:
+            raise AdobeRequestError(f"upload {media_kind} failed: invalid response")
+        if not media_id:
+            raise AdobeRequestError(
+                f"upload {media_kind} succeeded but no asset id returned"
+            )
+        return str(media_id)
+
     @staticmethod
     def _json_or_empty(resp) -> Any:
         if not str(getattr(resp, "text", "") or "").strip():
@@ -983,18 +1031,23 @@ class AdobeClient:
 
     @staticmethod
     def _video_size(aspect_ratio: str, resolution: str = "720p") -> dict:
-        res = str(resolution or "720p").lower()
-        if res == "480p":
-            if aspect_ratio == "16:9":
-                return {"width": 854, "height": 480}
-            return {"width": 480, "height": 854}
-        if res == "1080p":
-            if aspect_ratio == "16:9":
-                return {"width": 1920, "height": 1080}
-            return {"width": 1080, "height": 1920}
-        if aspect_ratio == "16:9":
-            return {"width": 1280, "height": 720}
-        return {"width": 720, "height": 1280}
+        short_edge = {"480p": 480, "720p": 720, "1080p": 1080}.get(
+            str(resolution or "720p").lower(), 720
+        )
+        try:
+            ratio_width, ratio_height = (
+                int(value) for value in str(aspect_ratio).split(":", 1)
+            )
+            if ratio_width <= 0 or ratio_height <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            ratio_width, ratio_height = 9, 16
+
+        if ratio_width >= ratio_height:
+            width = round(short_edge * ratio_width / ratio_height / 2) * 2
+            return {"width": width, "height": short_edge}
+        height = round(short_edge * ratio_height / ratio_width / 2) * 2
+        return {"width": short_edge, "height": height}
 
     @staticmethod
     def _coerce_progress_percent(value: Any) -> Optional[float]:
@@ -1156,6 +1209,9 @@ class AdobeClient:
         aspect_ratio: str,
         duration: int,
         source_image_ids: Optional[list[str]] = None,
+        reference_image_ids: Optional[list[str]] = None,
+        reference_video_ids: Optional[list[str]] = None,
+        reference_audio_ids: Optional[list[str]] = None,
         entity_refs: Optional[list[dict]] = None,
         negative_prompt: str = "",
         generate_audio: bool = True,
@@ -1173,18 +1229,38 @@ class AdobeClient:
         )
         resolution = str(video_conf.get("resolution") or "720p")
         if engine == "seedance2":
+            reference_blobs = [
+                {"id": str(image_id), "usage": "frame", "order": idx}
+                for idx, image_id in enumerate(
+                    (source_image_ids or [])[:2], start=1
+                )
+            ]
+            upstream_prompt = prompt
+            for ids, usage, label_prefix in (
+                ((reference_image_ids or [])[:9], "asset", "Image"),
+                ((reference_video_ids or [])[:3], "source", "Video"),
+                ((reference_audio_ids or [])[:3], "source", "Audio"),
+            ):
+                for idx, media_id in enumerate(ids, start=1):
+                    mention_id = uuid.uuid4().hex[:21]
+                    label = f"{label_prefix}{idx}"
+                    reference_blobs.append(
+                        {
+                            "id": str(media_id),
+                            "usage": usage,
+                            "mention": {"id": mention_id, "label": label},
+                        }
+                    )
+                    upstream_prompt = upstream_prompt.replace(
+                        f"@{label}", f"@{mention_id}"
+                    )
             return {
                 "modelId": "seedance",
                 "modelVersion": "seedance_2.0",
                 "size": self._video_size(aspect_ratio, resolution),
                 "seeds": [seed_val],
-                "referenceBlobs": [
-                    {"id": str(image_id), "usage": "frame", "order": idx}
-                    for idx, image_id in enumerate(
-                        (source_image_ids or [])[:2], start=1
-                    )
-                ],
-                "prompt": prompt,
+                "referenceBlobs": reference_blobs,
+                "prompt": upstream_prompt,
                 "negativePrompt": negative_prompt,
                 "duration": int(duration),
                 "generateAudio": bool(generate_audio),
@@ -1357,6 +1433,9 @@ class AdobeClient:
         aspect_ratio: str = "9:16",
         duration: int = 12,
         source_image_ids: Optional[list[str]] = None,
+        reference_image_ids: Optional[list[str]] = None,
+        reference_video_ids: Optional[list[str]] = None,
+        reference_audio_ids: Optional[list[str]] = None,
         entity_refs: Optional[list[dict]] = None,
         timeout: int = 600,
         negative_prompt: str = "",
@@ -1372,6 +1451,9 @@ class AdobeClient:
             aspect_ratio=aspect_ratio,
             duration=duration,
             source_image_ids=source_image_ids,
+            reference_image_ids=reference_image_ids,
+            reference_video_ids=reference_video_ids,
+            reference_audio_ids=reference_audio_ids,
             entity_refs=entity_refs,
             negative_prompt=negative_prompt,
             generate_audio=generate_audio,
@@ -1382,7 +1464,7 @@ class AdobeClient:
         submit_resp = self._post_json(
             self.video_submit_url,
             headers=(
-                self._submit_headers(token, prompt)
+                self._submit_headers(token, str(payload.get("prompt") or prompt))
                 if engine == "seedance2"
                 else self._video_submit_headers(token)
             ),

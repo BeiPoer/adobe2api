@@ -22,6 +22,28 @@ from core.models.payloads import (
 
 SEEDANCE_MODEL_ID = "doubao-seedance-2-0-260128"
 SEEDANCE_NEGATIVE_PROMPT = "cartoon, vector art, & bad aesthetics & poor aesthetic"
+SEEDANCE_RESOLUTIONS = {"480p", "720p", "1080p"}
+SEEDANCE_RATIOS = {"21:9", "16:9", "4:3", "1:1", "3:4", "9:16"}
+SEEDANCE_REQUEST_FIELDS = {
+    "model",
+    "content",
+    "resolution",
+    "ratio",
+    "duration",
+    "seed",
+    "generate_audio",
+    "watermark",
+    "camera_fixed",
+    "draft",
+    "return_last_frame",
+    "service_tier",
+    "priority",
+    "tools",
+    "frames",
+    "execution_expires_after",
+    "callback_url",
+    "safety_identifier",
+}
 
 
 def _parse_seedance_request(data: dict) -> dict:
@@ -32,6 +54,12 @@ def _parse_seedance_request(data: dict) -> dict:
             status_code=400,
             detail=f"unsupported model; use {SEEDANCE_MODEL_ID}",
         )
+    unknown = sorted(set(data) - SEEDANCE_REQUEST_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported parameter: {unknown[0]}",
+        )
 
     content = data.get("content")
     if not isinstance(content, list) or not content:
@@ -40,6 +68,8 @@ def _parse_seedance_request(data: dict) -> dict:
     prompt_parts: list[str] = []
     frames: dict[str, dict] = {}
     unassigned_frames: list[dict] = []
+    reference_images: list[dict] = []
+    reference_media: list[dict] = []
     for item in content:
         if not isinstance(item, dict):
             raise HTTPException(status_code=400, detail="content items must be objects")
@@ -49,29 +79,46 @@ def _parse_seedance_request(data: dict) -> dict:
             if text:
                 prompt_parts.append(text)
             continue
-        if item_type != "image_url":
+        if item_type not in {"image_url", "video_url", "audio_url"}:
             raise HTTPException(
                 status_code=400,
                 detail=f"unsupported content type: {item_type or 'empty'}",
             )
 
-        image_url = item.get("image_url")
+        media_url = item.get(item_type)
         url = (
-            str(image_url.get("url") or "").strip()
-            if isinstance(image_url, dict)
-            else str(image_url or "").strip()
+            str(media_url.get("url") or "").strip()
+            if isinstance(media_url, dict)
+            else str(media_url or "").strip()
         )
         if not url:
-            raise HTTPException(status_code=400, detail="image_url.url is required")
+            raise HTTPException(status_code=400, detail=f"{item_type}.url is required")
         role = str(item.get("role") or "").strip()
-        if role not in {"", "first_frame", "last_frame"}:
+
+        if item_type != "image_url":
+            expected_role = (
+                "reference_video" if item_type == "video_url" else "reference_audio"
+            )
+            if role != expected_role:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{item_type} role must be {expected_role}",
+                )
+            reference_media.append(
+                {"kind": "video" if item_type == "video_url" else "audio", "url": url}
+            )
+            continue
+
+        if role not in {"", "first_frame", "last_frame", "reference_image"}:
             raise HTTPException(status_code=400, detail=f"unsupported image role: {role}")
         normalized = {
             "type": "image_url",
             "image_url": {"url": url},
             "role": role or "first_frame",
         }
-        if not role:
+        if role == "reference_image":
+            reference_images.append(normalized)
+        elif not role:
             unassigned_frames.append(normalized)
         elif role in frames:
             raise HTTPException(status_code=400, detail=f"duplicate image role: {role}")
@@ -90,6 +137,26 @@ def _parse_seedance_request(data: dict) -> dict:
     if len(frames) > 2:
         raise HTTPException(status_code=400, detail="at most two frame images are supported")
 
+    if frames and (reference_images or reference_media):
+        raise HTTPException(
+            status_code=400,
+            detail="frame images and reference media cannot be used together",
+        )
+    reference_video_count = sum(
+        item["kind"] == "video" for item in reference_media
+    )
+    reference_audio_count = sum(
+        item["kind"] == "audio" for item in reference_media
+    )
+    if len(reference_images) > 9:
+        raise HTTPException(status_code=400, detail="at most 9 reference images are supported")
+    if reference_video_count > 3:
+        raise HTTPException(status_code=400, detail="at most 3 reference videos are supported")
+    if reference_audio_count > 3:
+        raise HTTPException(status_code=400, detail="at most 3 reference audios are supported")
+    if len(reference_images) + len(reference_media) > 9:
+        raise HTTPException(status_code=400, detail="at most 9 reference media are supported")
+
     prompt = "\n".join(prompt_parts).strip()
     if not prompt:
         raise HTTPException(
@@ -97,15 +164,21 @@ def _parse_seedance_request(data: dict) -> dict:
             detail="a non-empty text prompt is required by the Adobe upstream",
         )
 
-    resolution = str(data.get("resolution") or "480p").strip().lower()
+    resolution = str(data.get("resolution") or "720p").strip().lower()
     ratio = str(data.get("ratio") or "16:9").strip()
     duration = data.get("duration", 5)
-    if resolution != "480p":
-        raise HTTPException(status_code=400, detail="only resolution=480p is supported")
-    if ratio != "16:9":
-        raise HTTPException(status_code=400, detail="only ratio=16:9 is supported")
-    if isinstance(duration, bool) or duration != 5:
-        raise HTTPException(status_code=400, detail="only duration=5 is supported")
+    if resolution not in SEEDANCE_RESOLUTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="resolution must be one of: 480p, 720p, 1080p",
+        )
+    if ratio not in SEEDANCE_RATIOS:
+        raise HTTPException(
+            status_code=400,
+            detail="ratio must be one of: 21:9, 16:9, 4:3, 1:1, 3:4, 9:16",
+        )
+    if isinstance(duration, bool) or not isinstance(duration, int) or not 4 <= duration <= 15:
+        raise HTTPException(status_code=400, detail="duration must be an integer from 4 to 15")
 
     seed = data.get("seed", -1)
     if isinstance(seed, bool) or not isinstance(seed, int):
@@ -124,18 +197,36 @@ def _parse_seedance_request(data: dict) -> dict:
     if watermark:
         raise HTTPException(status_code=400, detail="watermark=true is not supported")
 
+    for name in ("camera_fixed", "draft", "return_last_frame"):
+        value = data.get(name, False)
+        if not isinstance(value, bool):
+            raise HTTPException(status_code=400, detail=f"{name} must be boolean")
+        if value:
+            raise HTTPException(status_code=400, detail=f"{name}=true is not supported")
+
+    service_tier = str(data.get("service_tier") or "default").strip()
+    if service_tier != "default":
+        raise HTTPException(status_code=400, detail="only service_tier=default is supported")
+    priority = data.get("priority", 0)
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        raise HTTPException(status_code=400, detail="priority must be an integer")
+    if priority != 0:
+        raise HTTPException(status_code=400, detail="only priority=0 is supported")
+    tools = data.get("tools", [])
+    if not isinstance(tools, list):
+        raise HTTPException(status_code=400, detail="tools must be an array")
+    if tools:
+        raise HTTPException(status_code=400, detail="tools are not supported by Adobe Firefly")
+
     unsupported = sorted(
-        set(data)
-        & {
-            "camera_fixed",
-            "draft",
-            "execution_expires_after",
-            "frames",
-            "priority",
-            "return_last_frame",
-            "service_tier",
-            "tools",
-        }
+        name
+        for name in ("execution_expires_after", "frames")
+        if name in data and data[name] is not None
+    )
+    unsupported.extend(
+        name
+        for name in ("callback_url", "safety_identifier")
+        if str(data.get(name) or "").strip()
     )
     if unsupported:
         raise HTTPException(
@@ -151,6 +242,8 @@ def _parse_seedance_request(data: dict) -> dict:
             for role in ("first_frame", "last_frame")
             if role in frames
         ],
+        "reference_images": reference_images,
+        "reference_media": reference_media,
         "resolution": resolution,
         "ratio": ratio,
         "duration": duration,
@@ -179,6 +272,7 @@ def build_generation_router(
     public_generated_url: Callable[[Request, str], str],
     resolve_video_options: Callable[[dict], tuple[bool, str, str]],
     load_input_images: Callable[[Any], list[tuple[bytes, str]]],
+    load_input_media: Callable[[Any], list[tuple[bytes, str, str]]] | None = None,
     prepare_video_source_image: Callable[[bytes, str, str], tuple[bytes, str]],
     video_ext_from_meta: Callable[[dict], str],
     extract_prompt_from_messages: Callable[[Any], str],
@@ -843,8 +937,24 @@ def build_generation_router(
         input_images = load_input_images(
             [{"role": "user", "content": options["images"]}]
         )
+        input_reference_images = load_input_images(
+            [{"role": "user", "content": options["reference_images"]}],
+            max_items=9,
+        )
+        if options["reference_media"] and load_input_media is None:
+            raise HTTPException(
+                status_code=500,
+                detail="reference media loader is not configured",
+            )
+        input_reference_media = (
+            load_input_media(options["reference_media"])
+            if load_input_media is not None
+            else []
+        )
         prepared_images = [
-            prepare_video_source_image(image_bytes, options["ratio"], "480p")
+            prepare_video_source_image(
+                image_bytes, options["ratio"], options["resolution"]
+            )
             for image_bytes, _mime_type in input_images
         ]
 
@@ -883,6 +993,25 @@ def build_generation_router(
                         )
                         for image_bytes, mime_type in prepared_images
                     ]
+                    reference_image_ids = [
+                        client.upload_image(
+                            token,
+                            image_bytes,
+                            mime_type,
+                            firefly=True,
+                        )
+                        for image_bytes, mime_type in input_reference_images
+                    ]
+                    reference_video_ids = [
+                        client.upload_media(token, media_bytes, mime_type, kind)
+                        for media_bytes, mime_type, kind in input_reference_media
+                        if kind == "video"
+                    ]
+                    reference_audio_ids = [
+                        client.upload_media(token, media_bytes, mime_type, kind)
+                        for media_bytes, mime_type, kind in input_reference_media
+                        if kind == "audio"
+                    ]
                     tmp_path = generated_dir / f"{job_id}.video.tmp"
 
                     def progress_cb(update: dict):
@@ -896,11 +1025,17 @@ def build_generation_router(
 
                     video_bytes, video_meta = client.generate_video(
                         token=token,
-                        video_conf={"engine": "seedance2", "resolution": "480p"},
+                        video_conf={
+                            "engine": "seedance2",
+                            "resolution": options["resolution"],
+                        },
                         prompt=options["prompt"],
                         aspect_ratio=options["ratio"],
                         duration=options["duration"],
                         source_image_ids=source_image_ids,
+                        reference_image_ids=reference_image_ids,
+                        reference_video_ids=reference_video_ids,
+                        reference_audio_ids=reference_audio_ids,
                         timeout=max(int(client.generate_timeout), 600),
                         negative_prompt=SEEDANCE_NEGATIVE_PROMPT,
                         generate_audio=options["generate_audio"],

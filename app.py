@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import mimetypes
 import time
 import uuid
 import threading
@@ -906,7 +907,7 @@ def _data_url_to_bytes(url: str) -> tuple[bytes, str]:
         try:
             return base64.b64decode(body, validate=True), mime_type
         except binascii.Error:
-            raise ValueError("invalid base64 image data")
+            raise ValueError("invalid base64 data")
 
     return unquote_to_bytes(body), mime_type
 
@@ -953,8 +954,8 @@ def _normalize_image_mime(mime_type: str) -> str:
     return normalized
 
 
-def _load_input_images(messages) -> list[tuple[bytes, str]]:
-    image_urls = _extract_image_urls_from_messages(messages, max_items=6)
+def _load_input_images(messages, max_items: int = 6) -> list[tuple[bytes, str]]:
+    image_urls = _extract_image_urls_from_messages(messages, max_items=max_items)
     if not image_urls:
         return []
 
@@ -984,11 +985,67 @@ def _load_input_images(messages) -> list[tuple[bytes, str]]:
 
         if not image_bytes:
             raise HTTPException(status_code=400, detail="image_url is empty")
-        if len(image_bytes) > 10 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="image too large, max 10MB")
+        if len(image_bytes) > 30 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="image too large, max 30MB")
 
         loaded.append((image_bytes, _normalize_image_mime(mime_type)))
 
+    return loaded
+
+
+def _load_input_media(items) -> list[tuple[bytes, str, str]]:
+    allowed_types = {
+        "video": {"video/mp4", "video/quicktime"},
+        "audio": {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav"},
+    }
+    max_sizes = {"video": 200 * 1024 * 1024, "audio": 15 * 1024 * 1024}
+    loaded: list[tuple[bytes, str, str]] = []
+    for item in items or []:
+        kind = str(item.get("kind") or "").strip().lower()
+        url = str(item.get("url") or "").strip()
+        if kind not in allowed_types or not url:
+            raise HTTPException(status_code=400, detail="invalid reference media")
+        if url.startswith("data:"):
+            if kind != "audio":
+                raise HTTPException(status_code=400, detail="video_url must use HTTP(S)")
+            try:
+                media_bytes, mime_type = _data_url_to_bytes(url)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            if not url.lower().startswith(("http://", "https://")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{kind}_url must use HTTP(S)",
+                )
+            resp = requests.get(url, timeout=60)
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to fetch {kind}_url: {resp.status_code}",
+                )
+            media_bytes = resp.content
+            mime_type = (resp.headers.get("content-type") or "").split(";", 1)[
+                0
+            ].strip().lower()
+            if mime_type not in allowed_types[kind]:
+                mime_type = (mimetypes.guess_type(url)[0] or "").lower()
+
+        mime_type = str(mime_type or "").split(";", 1)[0].strip().lower()
+        if mime_type not in allowed_types[kind]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported {kind} content type: {mime_type or 'unknown'}",
+            )
+        if not media_bytes:
+            raise HTTPException(status_code=400, detail=f"{kind}_url is empty")
+        if len(media_bytes) > max_sizes[kind]:
+            limit_mb = max_sizes[kind] // (1024 * 1024)
+            raise HTTPException(
+                status_code=400,
+                detail=f"{kind} too large, max {limit_mb}MB",
+            )
+        loaded.append((media_bytes, mime_type, kind))
     return loaded
 
 
@@ -1003,13 +1060,8 @@ def _prepare_video_source_image(
             detail="Pillow is required for video image preprocessing (resize/crop)",
         )
 
-    res = str(resolution or "720p").lower()
-    if res == "480p":
-        target_size = (854, 480) if aspect_ratio == "16:9" else (480, 854)
-    elif res == "1080p":
-        target_size = (1920, 1080) if aspect_ratio == "16:9" else (1080, 1920)
-    else:
-        target_size = (1280, 720) if aspect_ratio == "16:9" else (720, 1280)
+    size = AdobeClient._video_size(aspect_ratio, resolution)
+    target_size = (size["width"], size["height"])
     try:
         with Image.open(io.BytesIO(image_bytes)) as src:
             src = src.convert("RGB")
@@ -1337,6 +1389,7 @@ app.include_router(
         public_generated_url=_public_generated_url,
         resolve_video_options=_resolve_video_options,
         load_input_images=_load_input_images,
+        load_input_media=_load_input_media,
         prepare_video_source_image=_prepare_video_source_image,
         video_ext_from_meta=_video_ext_from_meta,
         extract_prompt_from_messages=_extract_prompt_from_messages,
