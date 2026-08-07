@@ -214,7 +214,11 @@ Seedance 2.0 video models:
 - Duration: `4s` through `15s`
 - Ratio: `21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
 - Resolution: `480p` / `720p` / `1080p`
-- Supports 1 reference image, mapped to upstream `referenceBlobs[].usage="style"`
+- Supports up to 9 reference images, mapped to upstream `referenceBlobs[].usage="style"`
+- Supports up to 3 reference videos, mapped to upstream `referenceBlobs[].usage="source"`
+- Supports up to 3 reference audios, mapped to upstream `referenceBlobs[].usage="source"`
+- Image, video, and audio references are limited to 12 items total
+- Audio references require at least 1 image or video reference
 - Audio defaults to enabled; override with `generate_audio` / `generateAudio`
 - Examples:
   - `firefly-seedance20-4s-16x9-480p`
@@ -226,7 +230,11 @@ Seedance 2.0 Fast video models:
 - Duration: `4s` through `15s`
 - Ratio: `21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
 - Resolution: `480p` / `720p` / `1080p`
-- Supports 1 reference image, mapped to upstream `referenceBlobs[].usage="style"`
+- Supports up to 9 reference images, mapped to upstream `referenceBlobs[].usage="style"`
+- Supports up to 3 reference videos, mapped to upstream `referenceBlobs[].usage="source"`
+- Supports up to 3 reference audios, mapped to upstream `referenceBlobs[].usage="source"`
+- Image, video, and audio references are limited to 12 items total
+- Audio references require at least 1 image or video reference
 - Audio defaults to enabled; override with `generate_audio` / `generateAudio`
 - Examples:
   - `firefly-seedance20-fast-4s-16x9-480p`
@@ -304,7 +312,10 @@ Veo31 single-image semantics:
 - `firefly-veo31-ref-*`: reference-image mode
   - 1~3 images => reference images
 - `firefly-seedance20-*` / `firefly-seedance20-fast-*`: media reference mode
-  - 1 image => style reference (`usage="style"`)
+  - Up to 9 images => style references (`usage="style"`)
+  - Up to 3 videos => source references (`usage="source"`)
+  - Up to 3 audios => source references (`usage="source"`), paired with an image or video
+  - Up to 12 media references total; videos are limited to 100MB and audios to 15MB
 - `firefly-gemini-omni-*`: multimedia reference mode
   - Up to 4 images => style references (`usage="style"`)
   - Up to 1 video => source reference (`usage="source"`)
@@ -346,6 +357,8 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
 ```
 
 `video_url` can also be written as `input_video`. HTTP(S) URLs and data URLs are supported.
+
+Seedance reference audio uses `audio_url` or `input_audio` in the latest user message. MP3 and WAV HTTP(S) URLs or data URLs are supported. Audio cannot be the only reference and must be paired with an `image_url` or `video_url`.
 
 ### 3.3 Image endpoint: `/v1/images/generations`
 

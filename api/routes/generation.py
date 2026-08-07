@@ -33,8 +33,9 @@ def build_generation_router(
     public_image_url: Callable[[Request, str], str],
     public_generated_url: Callable[[Request, str], str],
     resolve_video_options: Callable[[dict], tuple[bool, str, str]],
-    load_input_images: Callable[[Any], list[tuple[bytes, str]]],
-    load_input_videos: Callable[[Any], list[tuple[bytes, str]]],
+    load_input_images: Callable[..., list[tuple[bytes, str]]],
+    load_input_videos: Callable[..., list[tuple[bytes, str]]],
+    load_input_audios: Callable[..., list[tuple[bytes, str]]],
     prepare_video_source_image: Callable[[bytes, str, str], tuple[bytes, str]],
     video_ext_from_meta: Callable[[dict], str],
     extract_prompt_from_messages: Callable[[Any], str],
@@ -633,11 +634,20 @@ def build_generation_router(
             kling_bound_refs: list[dict] | None = None
             if video_engine == "kling-o3":
                 entity_account_id, kling_bound_refs = _resolve_entity_bindings(prompt)
-            input_images = load_input_images(data.get("messages") or [])
+            messages = data.get("messages") or []
+            is_seedance = video_engine in {"seedance", "seedance-fast"}
+            input_images = (
+                load_input_images(messages, max_items=10)
+                if is_seedance
+                else load_input_images(messages)
+            )
             input_videos = (
-                load_input_videos(data.get("messages") or [])
-                if video_engine == "gemini-omni"
+                load_input_videos(messages, max_items=4 if is_seedance else 2)
+                if video_engine in {"gemini-omni", "seedance", "seedance-fast"}
                 else []
+            )
+            input_audios = (
+                load_input_audios(messages, max_items=4) if is_seedance else []
             )
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
@@ -646,17 +656,26 @@ def build_generation_router(
             def _run_once(token: str):
                 source_image_ids: list[str] = []
                 source_video_ids: list[str] = []
+                source_audio_ids: list[str] = []
                 image_url = ""
                 response_content = ""
 
                 if is_video_model:
                     if video_engine == "gemini-omni":
                         max_video_inputs = 4
+                        max_video_refs = 1
+                        max_audio_refs = 0
+                    elif is_seedance:
+                        max_video_inputs = 9
+                        max_video_refs = 3
+                        max_audio_refs = 3
                     elif (
                         video_engine == "veo31-standard"
                         and video_reference_mode == "image"
                     ):
                         max_video_inputs = 3
+                        max_video_refs = 0
+                        max_audio_refs = 0
                     else:
                         max_video_inputs = (
                             2
@@ -664,11 +683,37 @@ def build_generation_router(
                             in {"veo31-fast", "veo31-standard", "kling-o3", "kling3"}
                             else 1
                         )
+                        max_video_refs = 0
+                        max_audio_refs = 0
                     if len(input_images) > max_video_inputs:
                         raise HTTPException(
                             status_code=400,
                             detail=f"video model supports at most {max_video_inputs} input image(s)",
                         )
+                    if len(input_videos) > max_video_refs:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"video model supports at most {max_video_refs} input video(s)",
+                        )
+                    if len(input_audios) > max_audio_refs:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"video model supports at most {max_audio_refs} input audio(s)",
+                        )
+                    if is_seedance:
+                        total_refs = (
+                            len(input_images) + len(input_videos) + len(input_audios)
+                        )
+                        if total_refs > 12:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="reference media supports at most 12 item(s) total for Seedance models",
+                            )
+                        if input_audios and not input_images and not input_videos:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="audio references require at least one image or video reference",
+                            )
                     for image_bytes, _image_mime in input_images[:max_video_inputs]:
                         prepared_bytes, prepared_mime = prepare_video_source_image(
                             image_bytes,
@@ -678,14 +723,13 @@ def build_generation_router(
                         source_image_ids.append(
                             client.upload_image(token, prepared_bytes, prepared_mime)
                         )
-                    if len(input_videos) > 1:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Gemini Omni supports at most 1 input video",
-                        )
-                    for video_bytes, video_mime in input_videos[:1]:
+                    for video_bytes, video_mime in input_videos[:max_video_refs]:
                         source_video_ids.append(
                             client.upload_video(token, video_bytes, video_mime)
+                        )
+                    for audio_bytes, audio_mime in input_audios[:max_audio_refs]:
+                        source_audio_ids.append(
+                            client.upload_audio(token, audio_bytes, audio_mime)
                         )
 
                     def _video_progress_cb(update: dict):
@@ -722,6 +766,7 @@ def build_generation_router(
                         duration=duration,
                         source_image_ids=source_image_ids,
                         source_video_ids=source_video_ids,
+                        source_audio_ids=source_audio_ids,
                         entity_refs=entity_refs,
                         timeout=max(int(client.generate_timeout), 600),
                         negative_prompt=negative_prompt,

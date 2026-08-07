@@ -896,7 +896,10 @@ def _data_url_to_bytes(url: str, media_kind: str = "image") -> tuple[bytes, str]
     if not sep:
         raise ValueError("invalid data url")
 
-    default_mime = "video/mp4" if media_kind == "video" else "image/jpeg"
+    default_mime = {
+        "audio": "audio/mpeg",
+        "video": "video/mp4",
+    }.get(media_kind, "image/jpeg")
     mime_type = default_mime
     mime_part = head[5:]
     if ";" in mime_part:
@@ -977,6 +980,38 @@ def _extract_video_urls_from_messages(messages, max_items: int = 2) -> list[str]
     return urls
 
 
+def _extract_audio_urls_from_messages(messages, max_items: int = 4) -> list[str]:
+    urls: list[str] = []
+    if not isinstance(messages, list):
+        return urls
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return urls
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") not in {"audio_url", "input_audio"}:
+                continue
+            audio_url = part.get("audio_url") or part.get("input_audio")
+            if isinstance(audio_url, str):
+                audio_url = audio_url.strip()
+            elif isinstance(audio_url, dict):
+                audio_url = str(audio_url.get("url") or "").strip()
+            else:
+                audio_url = ""
+            if audio_url:
+                urls.append(audio_url)
+                if len(urls) >= max_items:
+                    return urls
+        return urls
+    return urls
+
+
 def _normalize_image_mime(mime_type: str) -> str:
     allowed = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
     normalized = str(mime_type or "").lower()
@@ -1007,8 +1042,25 @@ def _normalize_video_mime(mime_type: str, source_url: str = "") -> str:
     return ""
 
 
-def _load_input_images(messages) -> list[tuple[bytes, str]]:
-    image_urls = _extract_image_urls_from_messages(messages, max_items=6)
+def _normalize_audio_mime(mime_type: str, source_url: str = "") -> str:
+    normalized = str(mime_type or "").split(";", 1)[0].strip().lower()
+    if normalized in {"audio/mp3", "audio/mpeg3"}:
+        return "audio/mpeg"
+    if normalized in {"audio/wave", "audio/vnd.wave", "audio/x-wav"}:
+        return "audio/wav"
+    if normalized in {"audio/mpeg", "audio/wav"}:
+        return normalized
+
+    path = str(source_url or "").split("?", 1)[0].split("#", 1)[0].lower()
+    if path.endswith(".mp3"):
+        return "audio/mpeg"
+    if path.endswith(".wav"):
+        return "audio/wav"
+    return ""
+
+
+def _load_input_images(messages, max_items: int = 6) -> list[tuple[bytes, str]]:
+    image_urls = _extract_image_urls_from_messages(messages, max_items=max_items)
     if not image_urls:
         return []
 
@@ -1046,13 +1098,8 @@ def _load_input_images(messages) -> list[tuple[bytes, str]]:
     return loaded
 
 
-def _load_input_videos(messages) -> list[tuple[bytes, str]]:
-    video_urls = _extract_video_urls_from_messages(messages, max_items=2)
-    if len(video_urls) > 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Gemini Omni supports at most 1 input video",
-        )
+def _load_input_videos(messages, max_items: int = 2) -> list[tuple[bytes, str]]:
+    video_urls = _extract_video_urls_from_messages(messages, max_items=max_items)
     if not video_urls:
         return []
 
@@ -1091,6 +1138,50 @@ def _load_input_videos(messages) -> list[tuple[bytes, str]]:
                 detail="video must be MP4, WebM, or MOV",
             )
         loaded.append((video_bytes, normalized_mime))
+
+    return loaded
+
+
+def _load_input_audios(messages, max_items: int = 4) -> list[tuple[bytes, str]]:
+    audio_urls = _extract_audio_urls_from_messages(messages, max_items=max_items)
+    if not audio_urls:
+        return []
+
+    loaded: list[tuple[bytes, str]] = []
+    for audio_url in audio_urls:
+        if audio_url.startswith("data:"):
+            try:
+                audio_bytes, mime_type = _data_url_to_bytes(
+                    audio_url, media_kind="audio"
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            if not audio_url.lower().startswith(("http://", "https://")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only http/https or data URL audios are supported",
+                )
+            with requests.get(audio_url, timeout=60) as resp:
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to fetch audio_url: {resp.status_code}",
+                    )
+                audio_bytes = resp.content
+                mime_type = resp.headers.get("content-type") or ""
+
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="audio_url is empty")
+        if len(audio_bytes) > 15 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="audio too large, max 15MB")
+        normalized_mime = _normalize_audio_mime(mime_type, audio_url)
+        if not normalized_mime:
+            raise HTTPException(
+                status_code=400,
+                detail="audio must be MP3 or WAV",
+            )
+        loaded.append((audio_bytes, normalized_mime))
 
     return loaded
 
@@ -1436,6 +1527,7 @@ app.include_router(
         resolve_video_options=_resolve_video_options,
         load_input_images=_load_input_images,
         load_input_videos=_load_input_videos,
+        load_input_audios=_load_input_audios,
         prepare_video_source_image=_prepare_video_source_image,
         video_ext_from_meta=_video_ext_from_meta,
         extract_prompt_from_messages=_extract_prompt_from_messages,

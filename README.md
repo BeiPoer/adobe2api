@@ -213,7 +213,11 @@ Seedance 2.0 视频模型：
 - 时长：`4s` 到 `15s`
 - 比例：`21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
 - 分辨率：`480p` / `720p` / `1080p`
-- 最多支持 1 张参考图（映射到上游 `referenceBlobs[].usage="style"`）
+- 最多支持 9 张参考图（映射到上游 `referenceBlobs[].usage="style"`）
+- 最多支持 3 个参考视频（映射到上游 `referenceBlobs[].usage="source"`）
+- 最多支持 3 个参考音频（映射到上游 `referenceBlobs[].usage="source"`）
+- 图片、视频、音频参考合计最多 12 项
+- 音频参考必须搭配至少 1 张图片或 1 个视频参考
 - 音频默认开启；可通过 `generate_audio` / `generateAudio` 覆盖
 - 示例：
   - `firefly-seedance20-4s-16x9-480p`
@@ -225,7 +229,11 @@ Seedance 2.0 Fast 视频模型：
 - 时长：`4s` 到 `15s`
 - 比例：`21x9` / `16x9` / `4x3` / `1x1` / `3x4` / `9x16`
 - 分辨率：`480p` / `720p` / `1080p`
-- 最多支持 1 张参考图（映射到上游 `referenceBlobs[].usage="style"`）
+- 最多支持 9 张参考图（映射到上游 `referenceBlobs[].usage="style"`）
+- 最多支持 3 个参考视频（映射到上游 `referenceBlobs[].usage="source"`）
+- 最多支持 3 个参考音频（映射到上游 `referenceBlobs[].usage="source"`）
+- 图片、视频、音频参考合计最多 12 项
+- 音频参考必须搭配至少 1 张图片或 1 个视频参考
 - 音频默认开启；可通过 `generate_audio` / `generateAudio` 覆盖
 - 示例：
   - `firefly-seedance20-fast-4s-16x9-480p`
@@ -315,7 +323,10 @@ Veo31 单图语义说明：
 - `firefly-veo31-ref-*`：参考图模式
   - 1~3 张图 => 参考图
 - `firefly-seedance20-*` / `firefly-seedance20-fast-*`：媒体参考模式
-  - 1 张图 => 风格参考（`usage="style"`）
+  - 最多 9 张图 => 风格参考（`usage="style"`）
+  - 最多 3 个视频 => 来源参考（`usage="source"`）
+  - 最多 3 个音频 => 来源参考（`usage="source"`），需搭配图片或视频
+  - 三类媒体合计最多 12 项；视频最大 100MB，音频最大 15MB
 - `firefly-gemini-omni-*`：多媒体参考模式
   - 最多 4 张图 => 风格参考（`usage="style"`）
   - 最多 1 个视频 => 来源参考（`usage="source"`）
@@ -357,6 +368,8 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
 ```
 
 `video_url` 也可以写成 `input_video`，并支持 HTTP(S) URL 或 data URL。
+
+Seedance 参考音频在最新 user 消息中使用 `audio_url` 或 `input_audio`，支持 MP3、WAV 的 HTTP(S) URL 或 data URL。音频不能单独作为参考，必须与 `image_url` 或 `video_url` 一起提供。
 
 ### 3.3 实体创建与可灵引用
 

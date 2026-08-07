@@ -114,6 +114,7 @@ class AdobeClient:
     video_submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async"
     upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/image"
     video_upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/video"
+    audio_upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/audio"
     entity_api_base = "https://firefly-entity.adobe.io/api/entities/"
     platform_cs_index_url = "https://platform-cs-edge.adobe.io/index"
     platform_cs_base = "https://platform-cs-va6.adobe.io/composite/component/path"
@@ -724,6 +725,47 @@ class AdobeClient:
             raise AdobeRequestError("upload video succeeded but no video id returned")
         return video_id
 
+    def upload_audio(
+        self, token: str, audio_bytes: bytes, mime_type: str = "audio/mpeg"
+    ) -> str:
+        if not audio_bytes:
+            raise AdobeRequestError("audio is empty")
+
+        headers = {
+            "authorization": f"Bearer {token}",
+            "x-api-key": self.api_key,
+            "content-type": mime_type,
+            "accept": "application/json",
+        }
+        resp = self._post_bytes(
+            self.audio_upload_url, headers=headers, payload=audio_bytes
+        )
+
+        if resp.status_code in (401, 403):
+            raise AuthError("Token invalid or expired")
+        if resp.status_code != 200:
+            if resp.status_code in (429, 451) or resp.status_code >= 500:
+                raise UpstreamTemporaryError(
+                    f"upload audio failed: {resp.status_code} {resp.text[:300]}",
+                    status_code=resp.status_code,
+                    error_type="status",
+                )
+            raise AdobeRequestError(
+                f"upload audio failed: {resp.status_code} {resp.text[:300]}"
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise AdobeRequestError("upload audio failed: invalid response")
+
+        audio_id = self._extract_storage_id(
+            data, "audios", "audio", "assets", "asset"
+        )
+        if not audio_id:
+            raise AdobeRequestError("upload audio succeeded but no audio id returned")
+        return audio_id
+
     @staticmethod
     def _json_or_empty(resp) -> Any:
         if not str(getattr(resp, "text", "") or "").strip():
@@ -1165,6 +1207,7 @@ class AdobeClient:
         duration: int,
         source_image_ids: Optional[list[str]] = None,
         source_video_ids: Optional[list[str]] = None,
+        source_audio_ids: Optional[list[str]] = None,
         entity_refs: Optional[list[dict]] = None,
         negative_prompt: str = "",
         generate_audio: bool = True,
@@ -1224,12 +1267,20 @@ class AdobeClient:
                     "submodule": "ff-video-generate",
                 },
                 "generationSettings": {"aspectRatio": aspect_ratio},
+                "output": {"storeInputs": True},
             }
-            if source_image_ids:
-                for image_id in source_image_ids[:1]:
-                    payload["referenceBlobs"].append(
-                        {"id": str(image_id), "usage": "style"}
-                    )
+            for image_id in (source_image_ids or [])[:9]:
+                payload["referenceBlobs"].append(
+                    {"id": str(image_id), "usage": "style"}
+                )
+            for video_id in (source_video_ids or [])[:3]:
+                payload["referenceBlobs"].append(
+                    {"id": str(video_id), "usage": "source"}
+                )
+            for audio_id in (source_audio_ids or [])[:3]:
+                payload["referenceBlobs"].append(
+                    {"id": str(audio_id), "usage": "source"}
+                )
             return payload
 
         if engine in {"veo31-fast", "veo31-standard"}:
@@ -1395,6 +1446,7 @@ class AdobeClient:
         duration: int = 12,
         source_image_ids: Optional[list[str]] = None,
         source_video_ids: Optional[list[str]] = None,
+        source_audio_ids: Optional[list[str]] = None,
         entity_refs: Optional[list[dict]] = None,
         timeout: int = 600,
         negative_prompt: str = "",
@@ -1410,6 +1462,7 @@ class AdobeClient:
             duration=duration,
             source_image_ids=source_image_ids,
             source_video_ids=source_video_ids,
+            source_audio_ids=source_audio_ids,
             entity_refs=entity_refs,
             negative_prompt=negative_prompt,
             generate_audio=generate_audio,
