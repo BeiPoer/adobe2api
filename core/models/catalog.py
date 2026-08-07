@@ -151,6 +151,25 @@ for dur in (4, 8, 12):
             "description": f"Firefly Sora2 Pro video model ({dur}s {ratio})",
         }
 
+for dur in (4, 6, 8, 10):
+    for ratio in ("16:9", "9:16"):
+        legacy_model_id = f"firefly-gemini-omni-{dur}s-{RATIO_SUFFIX_MAP[ratio]}"
+        for res in ("720p", "1080p"):
+            model_id = f"{legacy_model_id}-{res}"
+            VIDEO_MODEL_CATALOG[model_id] = {
+                "engine": "gemini-omni",
+                "upstream_model": "google:firefly:gemini-omni",
+                "upstream_model_id": "gemini-omni",
+                "upstream_model_version": "omni-flash",
+                "duration": dur,
+                "aspect_ratio": ratio,
+                "resolution": res,
+                "description": f"Firefly Gemini Omni video model ({dur}s {ratio} {res})",
+            }
+        VIDEO_MODEL_CATALOG[legacy_model_id] = dict(
+            VIDEO_MODEL_CATALOG[f"{legacy_model_id}-720p"]
+        )
+
 for dur in (4, 6, 8):
     for ratio in ("16:9", "9:16"):
         for res in ("1080p", "720p"):

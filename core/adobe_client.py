@@ -72,21 +72,6 @@ def _build_arp_session_id() -> str:
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def _arp_session_id_for_token(token: str) -> str:
-    try:
-        from core.refresh_mgr import refresh_manager
-        from core.token_mgr import token_manager
-
-        meta = token_manager.get_meta_by_value(token)
-        profile_id = str(meta.get("refresh_profile_id") or "").strip()
-        if not profile_id:
-            return ""
-        firefly_headers = refresh_manager.get_firefly_headers_for_profile(profile_id)
-        return str(firefly_headers.get("x-arp-session-id") or "").strip()
-    except Exception:
-        return ""
-
-
 class AdobeRequestError(Exception):
     def __init__(
         self,
@@ -128,12 +113,13 @@ class AdobeClient:
     submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-images/generate-async"
     video_submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async"
     upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/image"
+    video_upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/video"
     entity_api_base = "https://firefly-entity.adobe.io/api/entities/"
     platform_cs_index_url = "https://platform-cs-edge.adobe.io/index"
     platform_cs_base = "https://platform-cs-va6.adobe.io/composite/component/path"
 
     def __init__(self) -> None:
-        self.api_key = "projectx_webapp"
+        self.api_key = "clio-playground-web"
         self.impersonate = "chrome124"
         self.proxy = ""
         self.generate_timeout = 300
@@ -306,13 +292,13 @@ class AdobeClient:
     def _browser_headers(self) -> dict:
         return {
             "user-agent": self.user_agent,
-            "origin": "https://new.express.adobe.com",
-            "referer": "https://new.express.adobe.com/",
+            "origin": "https://firefly.adobe.com",
+            "referer": "https://firefly.adobe.com/",
             "accept-language": "en-US,en;q=0.9",
             "sec-ch-ua": self.sec_ch_ua,
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-site": "cross-site",
+            "sec-fetch-site": "same-site",
             "sec-fetch-mode": "cors",
             "sec-fetch-dest": "empty",
         }
@@ -327,6 +313,10 @@ class AdobeClient:
                 "accept": "*/*",
             }
         )
+        submit_nonce = _build_submit_nonce(token, prompt)
+        if submit_nonce:
+            headers["x-nonce"] = submit_nonce
+        headers["x-arp-session-id"] = _build_arp_session_id()
         return headers
 
     def _submit_headers_minimal(self, token: str) -> dict:
@@ -347,17 +337,16 @@ class AdobeClient:
                 "accept": "*/*",
             }
         )
+        headers["x-arp-session-id"] = _build_arp_session_id()
         return headers
 
     def _poll_headers(self, token: str) -> dict:
         return {
             "Authorization": f"Bearer {token}",
             "accept": "*/*",
-            "referer": "https://new.express.adobe.com/",
-            "origin": "https://new.express.adobe.com",
+            "referer": "https://firefly.adobe.com/",
+            "origin": "https://firefly.adobe.com",
             "user-agent": self.user_agent,
-            "x-api-key": self.api_key,
-            "content-type": "application/json",
         }
 
     def _entity_headers(self, token: str) -> dict:
@@ -674,6 +663,66 @@ class AdobeClient:
         if not image_id:
             raise AdobeRequestError("upload image succeeded but no image id returned")
         return str(image_id)
+
+    @staticmethod
+    def _extract_storage_id(data: Any, *keys: str) -> str:
+        if not isinstance(data, dict):
+            return ""
+        storage_id = str(data.get("id") or "").strip()
+        if storage_id:
+            return storage_id
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, dict):
+                storage_id = str(value.get("id") or "").strip()
+            elif isinstance(value, list) and value and isinstance(value[0], dict):
+                storage_id = str(value[0].get("id") or "").strip()
+            else:
+                storage_id = ""
+            if storage_id:
+                return storage_id
+        return ""
+
+    def upload_video(
+        self, token: str, video_bytes: bytes, mime_type: str = "video/mp4"
+    ) -> str:
+        if not video_bytes:
+            raise AdobeRequestError("video is empty")
+
+        headers = {
+            "authorization": f"Bearer {token}",
+            "x-api-key": self.api_key,
+            "content-type": mime_type,
+            "accept": "application/json",
+        }
+        resp = self._post_bytes(
+            self.video_upload_url, headers=headers, payload=video_bytes
+        )
+
+        if resp.status_code in (401, 403):
+            raise AuthError("Token invalid or expired")
+        if resp.status_code != 200:
+            if resp.status_code in (429, 451) or resp.status_code >= 500:
+                raise UpstreamTemporaryError(
+                    f"upload video failed: {resp.status_code} {resp.text[:300]}",
+                    status_code=resp.status_code,
+                    error_type="status",
+                )
+            raise AdobeRequestError(
+                f"upload video failed: {resp.status_code} {resp.text[:300]}"
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise AdobeRequestError("upload video failed: invalid response")
+
+        video_id = self._extract_storage_id(
+            data, "videos", "video", "assets", "asset"
+        )
+        if not video_id:
+            raise AdobeRequestError("upload video succeeded but no video id returned")
+        return video_id
 
     @staticmethod
     def _json_or_empty(resp) -> Any:
@@ -1115,6 +1164,7 @@ class AdobeClient:
         aspect_ratio: str,
         duration: int,
         source_image_ids: Optional[list[str]] = None,
+        source_video_ids: Optional[list[str]] = None,
         entity_refs: Optional[list[dict]] = None,
         negative_prompt: str = "",
         generate_audio: bool = True,
@@ -1126,6 +1176,33 @@ class AdobeClient:
             video_conf.get("upstream_model") or "openai:firefly:colligo:sora2"
         )
         resolution = str(video_conf.get("resolution") or "720p")
+        if engine == "gemini-omni":
+            model_id = str(video_conf.get("upstream_model_id") or "gemini-omni")
+            model_version = str(
+                video_conf.get("upstream_model_version") or "omni-flash"
+            )
+            reference_blobs = [
+                {"id": str(image_id), "usage": "style"}
+                for image_id in (source_image_ids or [])[:4]
+            ]
+            reference_blobs.extend(
+                {"id": str(video_id), "usage": "source"}
+                for video_id in (source_video_ids or [])[:1]
+            )
+            return {
+                "modelId": model_id,
+                "modelVersion": model_version,
+                "n": 1,
+                "seeds": [seed_val],
+                "prompt": prompt,
+                "output": {"storeInputs": True},
+                "referenceBlobs": reference_blobs,
+                "generationMetadata": {"module": "aura"},
+                "size": self._video_size(aspect_ratio, resolution),
+                "duration": int(duration),
+                "generationSettings": {"aspectRatio": aspect_ratio},
+            }
+
         if engine in {"seedance", "seedance-fast"}:
             model_version = str(
                 video_conf.get("upstream_model_version")
@@ -1317,6 +1394,7 @@ class AdobeClient:
         aspect_ratio: str = "9:16",
         duration: int = 12,
         source_image_ids: Optional[list[str]] = None,
+        source_video_ids: Optional[list[str]] = None,
         entity_refs: Optional[list[dict]] = None,
         timeout: int = 600,
         negative_prompt: str = "",
@@ -1331,6 +1409,7 @@ class AdobeClient:
             aspect_ratio=aspect_ratio,
             duration=duration,
             source_image_ids=source_image_ids,
+            source_video_ids=source_video_ids,
             entity_refs=entity_refs,
             negative_prompt=negative_prompt,
             generate_audio=generate_audio,

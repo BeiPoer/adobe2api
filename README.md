@@ -72,6 +72,7 @@ docker compose up -d --build
 - `firefly-gpt-image-*`（图像，对应上游 `gpt-image:2`）
 - `firefly-sora2-*`（视频）
 - `firefly-sora2-pro-*`（视频）
+- `firefly-gemini-omni-*`（视频，支持图片和视频参考）
 - `firefly-veo31-*`（视频）
 - `firefly-veo31-ref-*`（视频，参考图模式）
 - `firefly-veo31-fast-*`（视频）
@@ -149,6 +150,21 @@ Sora2 Pro 视频模型：
 - 示例：
   - `firefly-sora2-pro-4s-16x9`
   - `firefly-sora2-pro-8s-9x16`
+
+Gemini Omni 视频模型：
+
+- 命名：`firefly-gemini-omni-{duration}-{ratio}-{resolution}`
+- 时长：`4s` / `6s` / `8s` / `10s`
+- 比例：`16x9` / `9x16`
+- 分辨率：`720p` / `1080p`
+- 不带分辨率的兼容模型 ID 默认使用 `720p`
+- 最多支持 4 张图片参考，映射到上游 `referenceBlobs[].usage="style"`
+- 最多支持 1 个视频参考，映射到上游 `referenceBlobs[].usage="source"`
+- 视频参考支持 MP4、WebM、MOV，单个文件最大 100MB
+- 示例：
+  - `firefly-gemini-omni-10s-16x9-720p`
+  - `firefly-gemini-omni-6s-9x16-1080p`
+  - `firefly-gemini-omni-4s-16x9`（兼容别名，使用 720p）
 
 Veo31 视频模型：
 
@@ -300,6 +316,9 @@ Veo31 单图语义说明：
   - 1~3 张图 => 参考图
 - `firefly-seedance20-*` / `firefly-seedance20-fast-*`：媒体参考模式
   - 1 张图 => 风格参考（`usage="style"`）
+- `firefly-gemini-omni-*`：多媒体参考模式
+  - 最多 4 张图 => 风格参考（`usage="style"`）
+  - 最多 1 个视频 => 来源参考（`usage="source"`）
 
 图生视频：
 
@@ -318,6 +337,26 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
     }]
   }'
 ```
+
+Gemini Omni 视频参考生成（在最新 user 消息中传入视频）：
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "firefly-gemini-omni-10s-16x9-1080p",
+    "messages": [{
+      "role":"user",
+      "content":[
+        {"type":"text","text":"continue this scene with a smooth camera move"},
+        {"type":"video_url","video_url":{"url":"https://example.com/reference.mp4"}}
+      ]
+    }]
+  }'
+```
+
+`video_url` 也可以写成 `input_video`，并支持 HTTP(S) URL 或 data URL。
 
 ### 3.3 实体创建与可灵引用
 

@@ -74,6 +74,7 @@ Current supported model families are:
 - `firefly-gpt-image-*` (image, maps to upstream `gpt-image:2`)
 - `firefly-sora2-*` (video)
 - `firefly-sora2-pro-*` (video)
+- `firefly-gemini-omni-*` (video with image and video references)
 - `firefly-veo31-*` (video)
 - `firefly-veo31-ref-*` (video, reference-image mode)
 - `firefly-veo31-fast-*` (video)
@@ -150,6 +151,21 @@ Sora2 Pro video models:
 - Examples:
   - `firefly-sora2-pro-4s-16x9`
   - `firefly-sora2-pro-8s-9x16`
+
+Gemini Omni video models:
+
+- Pattern: `firefly-gemini-omni-{duration}-{ratio}-{resolution}`
+- Duration: `4s` / `6s` / `8s` / `10s`
+- Ratio: `16x9` / `9x16`
+- Resolution: `720p` / `1080p`
+- Compatibility model IDs without a resolution suffix use `720p`
+- Supports up to 4 image references, mapped to upstream `referenceBlobs[].usage="style"`
+- Supports up to 1 video reference, mapped to upstream `referenceBlobs[].usage="source"`
+- Reference videos support MP4, WebM, and MOV, up to 100MB
+- Examples:
+  - `firefly-gemini-omni-10s-16x9-720p`
+  - `firefly-gemini-omni-6s-9x16-1080p`
+  - `firefly-gemini-omni-4s-16x9` (compatibility alias using 720p)
 
 Veo31 video models:
 
@@ -289,6 +305,9 @@ Veo31 single-image semantics:
   - 1~3 images => reference images
 - `firefly-seedance20-*` / `firefly-seedance20-fast-*`: media reference mode
   - 1 image => style reference (`usage="style"`)
+- `firefly-gemini-omni-*`: multimedia reference mode
+  - Up to 4 images => style references (`usage="style"`)
+  - Up to 1 video => source reference (`usage="source"`)
 
 Image-to-video:
 
@@ -307,6 +326,26 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
     }]
   }'
 ```
+
+Gemini Omni generation with a video reference (pass the video in the latest user message):
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "firefly-gemini-omni-10s-16x9-1080p",
+    "messages": [{
+      "role":"user",
+      "content":[
+        {"type":"text","text":"continue this scene with a smooth camera move"},
+        {"type":"video_url","video_url":{"url":"https://example.com/reference.mp4"}}
+      ]
+    }]
+  }'
+```
+
+`video_url` can also be written as `input_video`. HTTP(S) URLs and data URLs are supported.
 
 ### 3.3 Image endpoint: `/v1/images/generations`
 

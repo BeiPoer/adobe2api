@@ -888,7 +888,7 @@ def _extract_prompt_from_messages(messages) -> str:
     return ""
 
 
-def _data_url_to_bytes(url: str) -> tuple[bytes, str]:
+def _data_url_to_bytes(url: str, media_kind: str = "image") -> tuple[bytes, str]:
     raw = str(url or "").strip()
     if not raw.startswith("data:"):
         raise ValueError("not a data url")
@@ -896,10 +896,11 @@ def _data_url_to_bytes(url: str) -> tuple[bytes, str]:
     if not sep:
         raise ValueError("invalid data url")
 
-    mime_type = "image/jpeg"
+    default_mime = "video/mp4" if media_kind == "video" else "image/jpeg"
+    mime_type = default_mime
     mime_part = head[5:]
     if ";" in mime_part:
-        mime_type = (mime_part.split(";", 1)[0] or "image/jpeg").strip()
+        mime_type = (mime_part.split(";", 1)[0] or default_mime).strip()
     elif mime_part:
         mime_type = mime_part.strip()
 
@@ -907,7 +908,7 @@ def _data_url_to_bytes(url: str) -> tuple[bytes, str]:
         try:
             return base64.b64decode(body, validate=True), mime_type
         except binascii.Error:
-            raise ValueError("invalid base64 image data")
+            raise ValueError(f"invalid base64 {media_kind} data")
 
     return unquote_to_bytes(body), mime_type
 
@@ -944,6 +945,38 @@ def _extract_image_urls_from_messages(messages, max_items: int = 6) -> list[str]
     return urls
 
 
+def _extract_video_urls_from_messages(messages, max_items: int = 2) -> list[str]:
+    urls: list[str] = []
+    if not isinstance(messages, list):
+        return urls
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return urls
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") not in {"video_url", "input_video"}:
+                continue
+            video_url = part.get("video_url") or part.get("input_video")
+            if isinstance(video_url, str):
+                video_url = video_url.strip()
+            elif isinstance(video_url, dict):
+                video_url = str(video_url.get("url") or "").strip()
+            else:
+                video_url = ""
+            if video_url:
+                urls.append(video_url)
+                if len(urls) >= max_items:
+                    return urls
+        return urls
+    return urls
+
+
 def _normalize_image_mime(mime_type: str) -> str:
     allowed = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
     normalized = str(mime_type or "").lower()
@@ -952,6 +985,26 @@ def _normalize_image_mime(mime_type: str) -> str:
     if normalized not in allowed:
         normalized = "image/jpeg"
     return normalized
+
+
+def _normalize_video_mime(mime_type: str, source_url: str = "") -> str:
+    normalized = str(mime_type or "").split(";", 1)[0].strip().lower()
+    aliases = {
+        "video/x-m4v": "video/mp4",
+        "video/mov": "video/quicktime",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized in {"video/mp4", "video/webm", "video/quicktime"}:
+        return normalized
+
+    path = str(source_url or "").split("?", 1)[0].split("#", 1)[0].lower()
+    if path.endswith((".mp4", ".m4v")):
+        return "video/mp4"
+    if path.endswith(".webm"):
+        return "video/webm"
+    if path.endswith(".mov"):
+        return "video/quicktime"
+    return ""
 
 
 def _load_input_images(messages) -> list[tuple[bytes, str]]:
@@ -989,6 +1042,55 @@ def _load_input_images(messages) -> list[tuple[bytes, str]]:
             raise HTTPException(status_code=400, detail="image too large, max 10MB")
 
         loaded.append((image_bytes, _normalize_image_mime(mime_type)))
+
+    return loaded
+
+
+def _load_input_videos(messages) -> list[tuple[bytes, str]]:
+    video_urls = _extract_video_urls_from_messages(messages, max_items=2)
+    if len(video_urls) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Gemini Omni supports at most 1 input video",
+        )
+    if not video_urls:
+        return []
+
+    loaded: list[tuple[bytes, str]] = []
+    for video_url in video_urls:
+        if video_url.startswith("data:"):
+            try:
+                video_bytes, mime_type = _data_url_to_bytes(
+                    video_url, media_kind="video"
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            if not video_url.lower().startswith(("http://", "https://")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only http/https or data URL videos are supported",
+                )
+            with requests.get(video_url, timeout=60) as resp:
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to fetch video_url: {resp.status_code}",
+                    )
+                video_bytes = resp.content
+                mime_type = resp.headers.get("content-type") or ""
+
+        if not video_bytes:
+            raise HTTPException(status_code=400, detail="video_url is empty")
+        if len(video_bytes) > 100 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="video too large, max 100MB")
+        normalized_mime = _normalize_video_mime(mime_type, video_url)
+        if not normalized_mime:
+            raise HTTPException(
+                status_code=400,
+                detail="video must be MP4, WebM, or MOV",
+            )
+        loaded.append((video_bytes, normalized_mime))
 
     return loaded
 
@@ -1333,6 +1435,7 @@ app.include_router(
         public_generated_url=_public_generated_url,
         resolve_video_options=_resolve_video_options,
         load_input_images=_load_input_images,
+        load_input_videos=_load_input_videos,
         prepare_video_source_image=_prepare_video_source_image,
         video_ext_from_meta=_video_ext_from_meta,
         extract_prompt_from_messages=_extract_prompt_from_messages,

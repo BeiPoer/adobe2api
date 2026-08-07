@@ -34,6 +34,7 @@ def build_generation_router(
     public_generated_url: Callable[[Request, str], str],
     resolve_video_options: Callable[[dict], tuple[bool, str, str]],
     load_input_images: Callable[[Any], list[tuple[bytes, str]]],
+    load_input_videos: Callable[[Any], list[tuple[bytes, str]]],
     prepare_video_source_image: Callable[[bytes, str, str], tuple[bytes, str]],
     video_ext_from_meta: Callable[[dict], str],
     extract_prompt_from_messages: Callable[[Any], str],
@@ -571,6 +572,7 @@ def build_generation_router(
         model_id = str(data.get("model") or "").strip()
         if (
             model_id.startswith("firefly-sora2")
+            or model_id.startswith("firefly-gemini-omni")
             or model_id.startswith("firefly-veo31-fast")
             or model_id.startswith("firefly-veo31-")
             or model_id.startswith("firefly-kling-")
@@ -581,7 +583,7 @@ def build_generation_router(
                 status_code=400,
                 content={
                     "error": {
-                        "message": "Invalid video model. Use /v1/models to get supported firefly-sora2-*, firefly-veo31-*, firefly-kling-*, firefly-kling3-* or firefly-seedance20-* models",
+                        "message": "Invalid video model. Use /v1/models to get supported firefly-sora2-*, firefly-gemini-omni-*, firefly-veo31-*, firefly-kling-*, firefly-kling3-* or firefly-seedance20-* models",
                         "type": "invalid_request_error",
                     }
                 },
@@ -632,17 +634,25 @@ def build_generation_router(
             if video_engine == "kling-o3":
                 entity_account_id, kling_bound_refs = _resolve_entity_bindings(prompt)
             input_images = load_input_images(data.get("messages") or [])
+            input_videos = (
+                load_input_videos(data.get("messages") or [])
+                if video_engine == "gemini-omni"
+                else []
+            )
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
             )
 
             def _run_once(token: str):
                 source_image_ids: list[str] = []
+                source_video_ids: list[str] = []
                 image_url = ""
                 response_content = ""
 
                 if is_video_model:
-                    if (
+                    if video_engine == "gemini-omni":
+                        max_video_inputs = 4
+                    elif (
                         video_engine == "veo31-standard"
                         and video_reference_mode == "image"
                     ):
@@ -667,6 +677,15 @@ def build_generation_router(
                         )
                         source_image_ids.append(
                             client.upload_image(token, prepared_bytes, prepared_mime)
+                        )
+                    if len(input_videos) > 1:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Gemini Omni supports at most 1 input video",
+                        )
+                    for video_bytes, video_mime in input_videos[:1]:
+                        source_video_ids.append(
+                            client.upload_video(token, video_bytes, video_mime)
                         )
 
                     def _video_progress_cb(update: dict):
@@ -702,6 +721,7 @@ def build_generation_router(
                         aspect_ratio=ratio,
                         duration=duration,
                         source_image_ids=source_image_ids,
+                        source_video_ids=source_video_ids,
                         entity_refs=entity_refs,
                         timeout=max(int(client.generate_timeout), 600),
                         negative_prompt=negative_prompt,
