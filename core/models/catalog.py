@@ -105,6 +105,13 @@ _register_nano_banana_family(
     ratio_suffix_map=NANO_BANANA2_RATIO_SUFFIX_MAP,
 )
 _register_gpt_image_family()
+MODEL_CATALOG["gpt-image-2"] = {
+    "upstream_model": "openai:firefly:gpt-image",
+    "upstream_model_id": "gpt-image",
+    "upstream_model_version": "2",
+    "output_resolution": "1K",
+    "description": "GPT Image 2 (OpenAI-compatible parameters)",
+}
 
 DEFAULT_MODEL_ID = "firefly-nano-banana-pro-2k-16x9"
 

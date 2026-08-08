@@ -134,6 +134,43 @@ def gpt_image_size_string(size: Optional[dict]) -> str:
     return f"{width}x{height}"
 
 
+def parse_gpt_image_size(value: Optional[str]) -> dict:
+    raw = str(value or "auto").strip().lower()
+    if raw == "auto":
+        return {"width": 1024, "height": 1024}
+
+    parts = raw.split("x")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise ValueError("size must be 'WIDTHxHEIGHT' or 'auto'")
+
+    width, height = (int(part) for part in parts)
+    long_edge, short_edge = max(width, height), min(width, height)
+    pixels = width * height
+    if long_edge > 3840:
+        raise ValueError("size edge must not exceed 3840px")
+    if width % 16 or height % 16:
+        raise ValueError("size edges must be multiples of 16px")
+    if short_edge <= 0 or long_edge > short_edge * 3:
+        raise ValueError("size aspect ratio must not exceed 3:1")
+    if not 655_360 <= pixels <= 8_294_400:
+        raise ValueError("size total pixels must be between 655360 and 8294400")
+    return {"width": width, "height": height}
+
+
+def parse_gpt_image_n(value: object = None) -> int:
+    if value is None:
+        return 1
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError("n must be an integer between 1 and 10")
+    try:
+        count = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("n must be an integer between 1 and 10")
+    if not 1 <= count <= 10:
+        raise ValueError("n must be an integer between 1 and 10")
+    return count
+
+
 def gpt_image_detail_level(output_resolution: str) -> int:
     return 1
 
@@ -157,6 +194,8 @@ def build_image_payload_candidates(
     quality_level: Optional[str] = None,
     detail_level: Optional[int] = None,
     source_image_ids: Optional[list[str]] = None,
+    pixel_size: Optional[dict] = None,
+    n: int = 1,
 ) -> list[dict]:
     normalized_ratio = str(aspect_ratio or "").strip().lower()
     effective_ratio = normalized_ratio or "1:1"
@@ -164,30 +203,34 @@ def build_image_payload_candidates(
         effective_detail_level = detail_level
         if effective_detail_level is None:
             effective_detail_level = gpt_image_detail_level_from_quality(quality_level)
-        pixel_size = gpt_image_pixels_from_ratio(effective_ratio, output_resolution)
+        explicit_pixel_size = pixel_size is not None
+        if pixel_size is None:
+            pixel_size = gpt_image_pixels_from_ratio(effective_ratio, output_resolution)
         if pixel_size is None:
             raise ValueError(f"unsupported gpt-image ratio: {effective_ratio}")
+        seed = int(time.time()) % 999999
         base_payload = {
             "modelId": upstream_model_id,
             "modelVersion": upstream_model_version,
-            "n": 1,
+            "n": int(n),
             "prompt": prompt,
-            "seeds": [int(time.time()) % 999999],
+            "seeds": [(seed + index) % 999999 for index in range(int(n))],
             "output": {"storeInputs": True},
             "referenceBlobs": [],
             "generationMetadata": {
                 "module": "text2image",
                 "submodule": "ff-image-generate",
             },
-            "modelSpecificPayload": {
-                "size": gpt_image_size_string(pixel_size),
-            },
-            "outputResolution": str(output_resolution or "2K").upper(),
+            "modelSpecificPayload": (
+                {} if explicit_pixel_size else {"size": gpt_image_size_string(pixel_size)}
+            ),
             "generationSettings": {
                 "detailLevel": int(effective_detail_level),
             },
         }
         base_payload["size"] = pixel_size
+        if not explicit_pixel_size:
+            base_payload["outputResolution"] = str(output_resolution or "2K").upper()
         if not source_image_ids:
             return [base_payload]
 
