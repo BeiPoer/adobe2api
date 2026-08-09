@@ -458,6 +458,21 @@ curl -X POST "http://127.0.0.1:6001/v1/images/generations" \
   }'
 ```
 
+### 3.5 图片编辑接口：`/v1/images/edits`
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/images/edits" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -F "model=gpt-image-2" \
+  -F "prompt=turn this photo into watercolor style" \
+  -F "image[]=@input.png" \
+  -F "size=1376x768" \
+  -F "quality=medium" \
+  -F "n=1"
+```
+
+编辑接口支持 1 到 16 张 JPEG、PNG 或 WebP 输入图，每张最大 50 MB，返回 `b64_json`。可以传入 `mask`，但当前适配会忽略它，不影响生成结果。
+
 ## 4）Cookie 导入
 
 ### 第一步：使用浏览器插件导出（推荐）

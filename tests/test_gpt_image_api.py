@@ -1,10 +1,12 @@
 import base64
 import unittest
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
-from fastapi import Request
+from fastapi import Request, UploadFile
+from starlette.datastructures import Headers
 
 from api.routes.generation import build_generation_router
 from core.adobe_client import AdobeClient
@@ -15,6 +17,71 @@ from core.models.payloads import (
     parse_gpt_image_size,
 )
 from core.models.resolver import resolve_model, resolve_ratio_and_resolution
+
+
+class ExpectedError(Exception):
+    pass
+
+
+def _unused(*args, **kwargs):
+    return None
+
+
+def _build_test_router(client, generated_dir: Path):
+    return build_generation_router(
+        store=None,
+        token_manager=None,
+        client=client,
+        generated_dir=generated_dir,
+        model_catalog=MODEL_CATALOG,
+        video_model_catalog={},
+        supported_ratios=set(),
+        resolve_model=resolve_model,
+        resolve_ratio_and_resolution=resolve_ratio_and_resolution,
+        require_service_api_key=_unused,
+        set_request_task_progress=_unused,
+        run_with_token_retries=lambda **kwargs: kwargs["run_once"]("token"),
+        set_request_error_detail=lambda *args, **kwargs: "error",
+        set_request_preview=_unused,
+        public_image_url=lambda request, image_id: f"/generated/{image_id}.png",
+        public_generated_url=lambda request, file_name: f"/generated/{file_name}",
+        resolve_video_options=_unused,
+        load_input_images=_unused,
+        load_input_videos=_unused,
+        load_input_audios=_unused,
+        prepare_video_source_image=_unused,
+        video_ext_from_meta=_unused,
+        extract_prompt_from_messages=_unused,
+        sse_chat_stream=_unused,
+        on_generated_file_written=_unused,
+        quota_error_cls=ExpectedError,
+        auth_error_cls=ExpectedError,
+        upstream_temp_error_cls=ExpectedError,
+        logger=Mock(),
+    )
+
+
+def _request(path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("testclient", 123),
+            "query_string": b"",
+        }
+    )
+
+
+def _upload(data: bytes = b"source", mime_type: str = "image/png") -> UploadFile:
+    return UploadFile(
+        file=BytesIO(data),
+        filename="input.png",
+        headers=Headers({"content-type": mime_type}),
+    )
 
 
 class GptImageApiTests(unittest.TestCase):
@@ -51,6 +118,26 @@ class GptImageApiTests(unittest.TestCase):
         self.assertEqual(alias["n"], 2)
         self.assertEqual(len(alias["seeds"]), 2)
         self.assertNotIn("outputResolution", alias)
+
+        edit = build_image_payload_candidates(
+            prompt="edit",
+            aspect_ratio="1:1",
+            output_resolution="1K",
+            upstream_model_id="gpt-image",
+            upstream_model_version="2",
+            detail_level=3,
+            source_image_ids=["image-1", "image-2"],
+            pixel_size={"width": 1376, "height": 768},
+            n=2,
+        )[0]
+        self.assertEqual(
+            edit["referenceBlobs"],
+            [
+                {"id": "image-1", "usage": "subject"},
+                {"id": "image-2", "usage": "subject"},
+            ],
+        )
+        self.assertNotIn("outputResolution", edit)
 
         legacy = build_image_payload_candidates(
             prompt="test",
@@ -120,61 +207,16 @@ class GptImageApiTests(unittest.TestCase):
                 self.calls.append(kwargs)
                 return [b"one", b"two"], {}
 
-        class ExpectedError(Exception):
-            pass
-
         client = Client()
-        unused = lambda *args, **kwargs: None
 
         with TemporaryDirectory() as temp_dir:
-            router = build_generation_router(
-                store=None,
-                token_manager=None,
-                client=client,
-                generated_dir=Path(temp_dir),
-                model_catalog=MODEL_CATALOG,
-                video_model_catalog={},
-                supported_ratios=set(),
-                resolve_model=resolve_model,
-                resolve_ratio_and_resolution=resolve_ratio_and_resolution,
-                require_service_api_key=unused,
-                set_request_task_progress=unused,
-                run_with_token_retries=lambda **kwargs: kwargs["run_once"]("token"),
-                set_request_error_detail=lambda *args, **kwargs: "error",
-                set_request_preview=unused,
-                public_image_url=lambda request, image_id: f"/generated/{image_id}.png",
-                public_generated_url=lambda request, file_name: f"/generated/{file_name}",
-                resolve_video_options=unused,
-                load_input_images=unused,
-                load_input_videos=unused,
-                load_input_audios=unused,
-                prepare_video_source_image=unused,
-                video_ext_from_meta=unused,
-                extract_prompt_from_messages=unused,
-                sse_chat_stream=unused,
-                on_generated_file_written=unused,
-                quota_error_cls=ExpectedError,
-                auth_error_cls=ExpectedError,
-                upstream_temp_error_cls=ExpectedError,
-                logger=Mock(),
-            )
+            router = _build_test_router(client, Path(temp_dir))
             endpoint = next(
                 route.endpoint
                 for route in router.routes
                 if route.path == "/v1/images/generations"
             )
-            request = Request(
-                {
-                    "type": "http",
-                    "method": "POST",
-                    "path": "/v1/images/generations",
-                    "headers": [],
-                    "scheme": "http",
-                    "server": ("testserver", 80),
-                    "client": ("testclient", 123),
-                    "query_string": b"",
-                }
-            )
+            request = _request("/v1/images/generations")
             data = {
                 "model": "gpt-image-2",
                 "prompt": "test",
@@ -206,6 +248,109 @@ class GptImageApiTests(unittest.TestCase):
             self.assertIsNone(call["quality_level"])
             self.assertEqual(call["n"], 2)
             self.assertIsNone(call["out_path"])
+
+    def test_edit_route_uploads_images_and_maps_alias_options(self):
+        class Client:
+            gpt_image_quality = "high"
+            generate_timeout = 30
+
+            def __init__(self):
+                self.calls = []
+                self.uploads = []
+
+            def upload_image(self, token, image_bytes, mime_type):
+                self.uploads.append((token, image_bytes, mime_type))
+                return f"image-{len(self.uploads)}"
+
+            def generate(self, **kwargs):
+                self.calls.append(kwargs)
+                return [b"edited-one", b"edited-two"], {}
+
+        client = Client()
+        with TemporaryDirectory() as temp_dir:
+            router = _build_test_router(client, Path(temp_dir))
+            endpoint = next(
+                route.endpoint
+                for route in router.routes
+                if route.path == "/v1/images/edits"
+            )
+            request = _request("/v1/images/edits")
+
+            response = endpoint(
+                request=request,
+                prompt="edit",
+                model="gpt-image-2",
+                size="1376x768",
+                quality="medium",
+                n=2,
+                image=[],
+                image_array=[_upload(b"one", "image/png"), _upload(b"two", "image/webp")],
+                mask=None,
+            )
+
+            self.assertEqual(
+                [item["b64_json"] for item in response["data"]],
+                [
+                    base64.b64encode(b"edited-one").decode("ascii"),
+                    base64.b64encode(b"edited-two").decode("ascii"),
+                ],
+            )
+            self.assertEqual(
+                client.uploads,
+                [
+                    ("token", b"one", "image/png"),
+                    ("token", b"two", "image/webp"),
+                ],
+            )
+            self.assertEqual(len(client.calls), 1)
+            call = client.calls[0]
+            self.assertEqual(call["source_image_ids"], ["image-1", "image-2"])
+            self.assertEqual(call["pixel_size"], {"width": 1376, "height": 768})
+            self.assertEqual(call["detail_level"], 3)
+            self.assertIsNone(call["quality_level"])
+            self.assertEqual(call["n"], 2)
+
+            missing_image = endpoint(
+                request=request,
+                prompt="edit",
+                model="gpt-image-2",
+                size="auto",
+                quality="medium",
+                n=1,
+                image=[],
+                image_array=[],
+                mask=None,
+            )
+            self.assertEqual(missing_image.status_code, 400)
+
+            unsupported_type = endpoint(
+                request=request,
+                prompt="edit",
+                model="gpt-image-2",
+                size="auto",
+                quality="medium",
+                n=1,
+                image=[_upload(mime_type="image/gif")],
+                image_array=[],
+                mask=None,
+            )
+            self.assertEqual(unsupported_type.status_code, 400)
+
+            masked_response = endpoint(
+                request=request,
+                prompt="edit",
+                model="gpt-image-2",
+                size="auto",
+                quality="medium",
+                n=2,
+                image=[_upload(b"masked-source")],
+                image_array=[],
+                mask=_upload(b"ignored-mask"),
+            )
+            self.assertEqual(masked_response["model"], "gpt-image-2")
+            self.assertEqual(len(client.calls), 2)
+            self.assertEqual(client.uploads[-1], ("token", b"masked-source", "image/png"))
+            self.assertNotIn(b"ignored-mask", [item[1] for item in client.uploads])
 
 
 if __name__ == "__main__":
